@@ -1,0 +1,34 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# Node dependencies
+node_modules/
+
+# Package manager files (optional: keep lockfiles if desired)
+# .pnp/
+# .pnp.js
+
+# Build output
+build/
+dist/
+
+# Testing
+coverage/
+
+# Local env files
+.env
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor directories and system files
+.vscode/
+.idea/
+.DS_Store
+
+# Misc caches
+.cache/
+parcel-cache/
