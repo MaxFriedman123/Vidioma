@@ -14,7 +14,7 @@
 }
 
 .App-header {
-  background-color: #282c34;
+  background-color: #2b2d35; /* Darker slate gray */
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -22,10 +22,153 @@
   justify-content: center;
   font-size: calc(10px + 2vmin);
   color: white;
+  position: relative; /* Needed for absolute positioning the sparkle */
 }
 
 .App-link {
   color: #61dafb;
+}
+
+.landing-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.landing-title {
+  font-size: 3rem;
+  font-weight: 700;
+  margin-bottom: 20px;
+  letter-spacing: 1px;
+}
+
+.modern-search-bar {
+  display: flex;
+  align-items: center;
+  background-color: #ffffff;
+  border-radius: 8px; /* Rounded pill look */
+  height: 50px;
+  width: 650px;
+  max-width: 90vw;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+}
+
+.input-icon {
+  padding: 0 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modern-search-bar input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 1rem;
+  color: #333;
+  background: transparent;
+  padding: 10px 0;
+}
+
+.modern-search-bar input::placeholder {
+  color: #999;
+}
+
+.divider {
+  width: 1px;
+  height: 24px;
+  background-color: #e0e0e0;
+  margin: 0 15px;
+}
+
+.landing-lang-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 15px;
+}
+
+/* ---------------------------------------------------
+   CUSTOM DROPDOWN STYLES
+--------------------------------------------------- */
+.custom-select-container {
+  position: relative;
+  outline: none;
+}
+
+.custom-select-trigger {
+  background-color: #f7f7f7;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.custom-select-trigger:hover {
+  border-color: #ccc;
+}
+
+.flag-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%; /* Makes the flags perfectly circular */
+  object-fit: cover;
+}
+
+.custom-select-dropdown {
+  position: absolute;
+  top: 110%;
+  left: 0;
+  background-color: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  width: 120px;
+  z-index: 10;
+  overflow: hidden;
+}
+
+.custom-select-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: #333;
+  font-size: 0.9rem;
+  transition: background-color 0.2s;
+}
+
+.custom-select-option:hover {
+  background-color: #f0f0f0;
+}
+
+.lang-arrow {
+  color: #888;
+  font-size: 1.2rem;
+}
+
+.go-button {
+  background-color: #7dd3e8; /* Light blue matching your image */
+  color: #000;
+  font-weight: 800;
+  font-size: 1rem;
+  border: none;
+  height: 100%;
+  padding: 0 35px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  border-top-right-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+
+.go-button:hover {
+  background-color: #6bc2d7;
 }
 
 .search-box input {

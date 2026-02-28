@@ -3,6 +3,52 @@ import axios from 'axios';
 import YouTube from 'react-youtube';
 import './App.css';
 
+// 1. Updated Languages Array with Flag Image URLs
+const languages = [
+  { code: 'en', name: 'English', icon: 'https://flagcdn.com/w40/us.png' },
+  { code: 'es', name: 'Spanish', icon: 'https://flagcdn.com/w40/es.png' },
+  { code: 'fr', name: 'French', icon: 'https://flagcdn.com/w40/fr.png' },
+  { code: 'de', name: 'German', icon: 'https://flagcdn.com/w40/de.png' },
+];
+
+// 2. Custom Dropdown Component to handle images
+const CustomSelect = ({ value, onChange, options }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const selectedOption = options.find(opt => opt.code === value);
+
+  return (
+    <div 
+      className="custom-select-container" 
+      tabIndex={0} 
+      onBlur={() => setIsOpen(false)}
+    >
+      <div className="custom-select-trigger" onClick={() => setIsOpen(!isOpen)}>
+        <img src={selectedOption.icon} alt={selectedOption.name} className="flag-icon" />
+        <svg className="chevron" viewBox="0 0 24 24" width="18" height="18">
+          <path d="M7 10l5 5 5-5z" fill="#333"/>
+        </svg>
+      </div>
+      {isOpen && (
+        <div className="custom-select-dropdown">
+          {options.map(opt => (
+            <div 
+              key={opt.code} 
+              className="custom-select-option"
+              onMouseDown={() => {
+                onChange(opt.code);
+                setIsOpen(false);
+              }}
+            >
+              <img src={opt.icon} alt={opt.name} className="flag-icon" />
+              <span>{opt.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 function App() {
   const [url, setUrl] = useState('');
   const [translated_transcript, setTranslatedTranscript] = useState([]);
@@ -14,16 +60,10 @@ function App() {
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
   const [showInput, setShowInput] = useState(false);  
-  const [fromLang, setFromLang] = useState('de'); // Default: Spanish
-  const [toLang, setToLang] = useState('en');   // Default: English
+  const [fromLang, setFromLang] = useState('en'); // Default to English
+  const [toLang, setToLang] = useState('es');   // Default to Spanish
 
   const inputRef = useRef(null);
-  const languages = [
-    { code: 'es', name: 'Spanish', flag: '🇪🇸' },
-    { code: 'en', name: 'English', flag: '🇺🇸' },
-    { code: 'fr', name: 'French', flag: '🇫🇷' },
-    { code: 'de', name: 'German', flag: '🇩🇪' },
-  ];
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -33,7 +73,7 @@ function App() {
         from_lang: fromLang,
         to_lang: toLang
        });
-      setTranscript(response.data.snippets); // Note: Make sure your backend sends 'snippets'
+      setTranscript(response.data.snippets); 
       setTranslatedTranscript(response.data.translated_snippets);
       setVideoId(response.data.video_id);
       setCurrentLineIndex(0); // Reset to start
@@ -69,7 +109,6 @@ function App() {
     return () => clearInterval(interval);
   }, [player, transcript, currentLineIndex, showInput]);
 
-
   // ---------------------------------------------------------
   // THE GAS PEDAL (Go to next line)
   // ---------------------------------------------------------
@@ -96,31 +135,65 @@ function App() {
     }
   }, [showInput]);
 
-
   // ---------------------------------------------------------
   // RENDER
   // ---------------------------------------------------------
   return (
     <div className="App">
       <header className="App-header">
-        <h1>Vidioma</h1>
         
-        {/* Search Bar */}
+        {/* LANDING PAGE UI */}
         {!videoId && (
-          <form onSubmit={handleSubmit} className="search-box">
-            <input 
-              type="text" 
-              placeholder="Paste YouTube URL..." 
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
-            <button type="submit">Go</button>
-          </form>
+          <div className="landing-container">
+            <h1 className="landing-title">Vidioma</h1>
+            
+            <form onSubmit={handleSubmit} className="modern-search-bar">
+              {/* Link Icon */}
+              <div className="input-icon">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="#888">
+                  <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
+                </svg>
+              </div>
+
+              {/* URL Input */}
+              <input 
+                type="text" 
+                placeholder="Paste YouTube URL..." 
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                required
+              />
+
+              {/* Vertical Divider */}
+              <div className="divider"></div>
+
+              {/* Language Selectors */}
+              <div className="landing-lang-group">
+                <CustomSelect 
+                  value={fromLang} 
+                  onChange={setFromLang} 
+                  options={languages} 
+                />
+
+                <span className="lang-arrow">→</span>
+
+                <CustomSelect 
+                  value={toLang} 
+                  onChange={setToLang} 
+                  options={languages} 
+                />
+              </div>
+
+              {/* Submit Button */}
+              <button type="submit" className="go-button">GO</button>
+            </form>
+          </div>
         )}
 
-        <div className="content-area">
-          {/* Video Player */}
-          {videoId && (
+        {/* TRANSCRIPT & VIDEO UI (Hides title and search bar when active) */}
+        {videoId && (
+          <div className="content-area">
+            {/* Video Player */}
             <div className="video-section">
               <div className="video-wrapper">
                 <YouTube 
@@ -129,86 +202,51 @@ function App() {
                     height: '390', 
                     width: '640',
                     playerVars: {
-                      rel: 0, // 1. Limit suggestions to same channel (Best we can do via API)
-                      modestbranding: 1, // Remove logos
-                      autoplay: 1, // Auto-play on load
+                      rel: 0, 
+                      modestbranding: 1, 
+                      autoplay: 1, 
                     }
                   }}
                   onReady={(event) => setPlayer(event.target)}
                 />
-                
-                {/* 2. The Privacy Curtain - Only shows when paused for input */}
                 {showInput && <div className="video-curtain" />}
               </div>
             </div>
-          )}
 
-          {/* The New "Focus Mode" Display */}
-          {transcript.length > 0 && (
-            <div className="focus-card">
-              
-              <div className="language-indicator">
-                {/* From Language Dropdown */}
-                <select 
-                  value={fromLang} 
-                  onChange={(e) => setFromLang(e.target.value)}
-                  className="lang-dropdown"
-                >
-                  {languages.map((lang) => (
-                    <option key={lang.code} value={lang.code}>
-                      {lang.flag} {lang.name}
-                    </option>
-                  ))}
-                </select>
+            {/* Focus Mode Display */}
+            {transcript.length > 0 && (
+              <div className="focus-card">
+                <h2 className="current-text">
+                  {transcript[currentLineIndex].source}
+                </h2>
+                <h2 className="current-text">
+                  {translated_transcript[currentLineIndex]}
+                </h2>
 
-                <span className="arrow">➔</span>
+                {showInput ? (
+                  <div className="input-container">
+                    <input 
+                      ref={inputRef}
+                      type="text" 
+                      className="big-input"
+                      placeholder="Type translation..." 
+                      value={userInput}
+                      onChange={(e) => setUserInput(e.target.value)}
+                      onKeyDown={handleInputSubmit}
+                    />
+                    <p className="hint">Press Enter to continue</p>
+                  </div>
+                ) : (
+                  <p className="listening-indicator">👂 Listening...</p>
+                )}
 
-                {/* To Language Dropdown */}
-                <select 
-                  value={toLang} 
-                  onChange={(e) => setToLang(e.target.value)}
-                  className="lang-dropdown"
-                >
-                  {languages.map((lang) => (
-                    <option key={lang.code} value={lang.code}>
-                      {lang.flag} {lang.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {/* 1. Show the Current Sentence */}
-              <h2 className="current-text">
-                {transcript[currentLineIndex].source}
-              </h2>
-              {/* 1.5. Show the Translated Sentence */}
-              <h2 className="current-text">
-                {translated_transcript[currentLineIndex]}
-              </h2>
-
-              {/* 2. Show Input ONLY when paused */}
-              {showInput ? (
-                <div className="input-container">
-                  <input 
-                    ref={inputRef}
-                    type="text" 
-                    className="big-input"
-                    placeholder="Type translation..." 
-                    value={userInput}
-                    onChange={(e) => setUserInput(e.target.value)}
-                    onKeyDown={handleInputSubmit}
-                  />
-                  <p className="hint">Press Enter to continue</p>
+                <div className="progress">
+                  Line {currentLineIndex + 1} of {transcript.length}
                 </div>
-              ) : (
-                <p className="listening-indicator">👂 Listening...</p>
-              )}
-
-              <div className="progress">
-                Line {currentLineIndex + 1} of {transcript.length}
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </header>
     </div>
   );
