@@ -5,6 +5,7 @@ import './App.css';
 
 function App() {
   const [url, setUrl] = useState('');
+  const [translated_transcript, setTranslatedTranscript] = useState([]);
   const [transcript, setTranscript] = useState([]);
   const [videoId, setVideoId] = useState('');
   const [player, setPlayer] = useState(null);
@@ -12,15 +13,28 @@ function App() {
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
-  const [showInput, setShowInput] = useState(false); // New state to hide/show box
+  const [showInput, setShowInput] = useState(false);  
+  const [fromLang, setFromLang] = useState('es'); // Default: Spanish
+  const [toLang, setToLang] = useState('zh-CN');   // Default: English
 
   const inputRef = useRef(null);
+  const languages = [
+    { code: 'es', name: 'Spanish', flag: '🇪🇸' },
+    { code: 'en', name: 'English', flag: '🇺🇸' },
+    { code: 'fr', name: 'French', flag: '🇫🇷' },
+    { code: 'de', name: 'German', flag: '🇩🇪' },
+  ];
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const response = await axios.post('http://127.0.0.1:5000/api/transcript', { url });
+      const response = await axios.post('http://127.0.0.1:5000/api/transcript', { 
+        url,
+        from_lang: fromLang,
+        to_lang: toLang
+       });
       setTranscript(response.data.snippets); // Note: Make sure your backend sends 'snippets'
+      setTranslatedTranscript(response.data.translated_snippets);
       setVideoId(response.data.video_id);
       setCurrentLineIndex(0); // Reset to start
       setShowInput(false);
@@ -131,13 +145,41 @@ function App() {
             <div className="focus-card">
               
               <div className="language-indicator">
-                <span className="flag">🇪🇸</span>
+                {/* From Language Dropdown */}
+                <select 
+                  value={fromLang} 
+                  onChange={(e) => setFromLang(e.target.value)}
+                  className="lang-dropdown"
+                >
+                  {languages.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.flag} {lang.name}
+                    </option>
+                  ))}
+                </select>
+
                 <span className="arrow">➔</span>
-                <span className="flag">🇺🇸</span>
+
+                {/* To Language Dropdown */}
+                <select 
+                  value={toLang} 
+                  onChange={(e) => setToLang(e.target.value)}
+                  className="lang-dropdown"
+                >
+                  {languages.map((lang) => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.flag} {lang.name}
+                    </option>
+                  ))}
+                </select>
               </div>
               {/* 1. Show the Current Sentence */}
               <h2 className="current-text">
-                {transcript[currentLineIndex].text}
+                {transcript[currentLineIndex].source}
+              </h2>
+              {/* 1.5. Show the Translated Sentence */}
+              <h2 className="current-text">
+                {translated_transcript[currentLineIndex]}
               </h2>
 
               {/* 2. Show Input ONLY when paused */}

@@ -127,6 +127,37 @@
   animation: pulse 1.5s infinite;
 }
 
+.language-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 15px;
+  margin-bottom: 20px;
+  background: #3d3d3d;
+  padding: 10px 20px;
+  border-radius: 30px;
+}
+
+.lang-dropdown {
+  background: transparent;
+  color: white;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  outline: none;
+  appearance: none; /* Removes the default arrow */
+  text-align: center;
+}
+
+.lang-dropdown:hover {
+  color: #61dafb;
+}
+
+.arrow {
+  color: #61dafb;
+  font-weight: bold;
+}
+
 @keyframes pulse {
   0% { opacity: 0.5; }
   50% { opacity: 1; }
