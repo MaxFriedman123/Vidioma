@@ -14,8 +14,8 @@ function App() {
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
   const [showInput, setShowInput] = useState(false);  
-  const [fromLang, setFromLang] = useState('es'); // Default: Spanish
-  const [toLang, setToLang] = useState('zh-CN');   // Default: English
+  const [fromLang, setFromLang] = useState('de'); // Default: Spanish
+  const [toLang, setToLang] = useState('en');   // Default: English
 
   const inputRef = useRef(null);
   const languages = [
@@ -54,7 +54,10 @@ function App() {
         if (!showInput) {
           const currentTime = await player.getCurrentTime();
           const currentLine = transcript[currentLineIndex];
-          const endTime = currentLineIndex < transcript.length - 1 && currentLine.start + currentLine.duration > transcript[currentLineIndex + 1].start ? transcript[currentLineIndex + 1].start-.2 : currentLine.start + currentLine.duration;
+          const endTime = 
+          currentLineIndex < transcript.length - 1 && currentLine.start + currentLine.duration > transcript[currentLineIndex + 1].start 
+          ? transcript[currentLineIndex + 1].start-.2 
+          : Math.min(currentLine.start + currentLine.duration, player.getDuration());
             // If we reached the end of the line...
           if (currentTime >= endTime) {
             player.pauseVideo();   // 1. Pause Video
