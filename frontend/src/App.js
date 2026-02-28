@@ -59,7 +59,8 @@ function App() {
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
-  const [showInput, setShowInput] = useState(false);  
+  const [showInput, setShowInput] = useState(false);
+  const [answered, setAnswered] = useState(false);
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
 
@@ -81,6 +82,19 @@ function App() {
     } catch (error) {
       console.error("Error:", error);
     }
+  };
+
+  // 3. Helper function to strip line breaks, punctuation, and extra spaces
+  const normalizeText = (text) => {
+    if (!text) return '';
+    return text
+      .normalize("NFD") // Normalize accented characters
+      .replace(/[\u0300-\u036f]/g, "") // Remove diacritics
+      .replace(/[\n\r]+/g, ' ')       // Replace line breaks with spaces
+      .replace(/['".,/#!$%^&*;:{}=\-_`´ˆ˜¨~()¡¿?]/g, '') // Remove common punctuation
+      .replace(/\s{2,}/g, ' ')        // Replace multiple spaces with a single space
+      .trim()                         // Remove leading/trailing spaces
+      .toLowerCase();                 // Make it all lowercase
   };
 
   // ---------------------------------------------------------
@@ -114,16 +128,22 @@ function App() {
   // ---------------------------------------------------------
   const handleInputSubmit = (e) => {
     if (e.key === 'Enter') {
-      // Move to next line if available
-      if (currentLineIndex < transcript.length - 1) {
-        const nextIndex = currentLineIndex + 1;
-        setCurrentLineIndex(nextIndex);
-        setUserInput('');       // Clear text
-        setShowInput(false);    // Hide box
-        
-        player.playVideo();     // Resume Video
+      if (answered) {
+        // Move to next line if available
+        if (currentLineIndex < transcript.length - 1) {
+          const nextIndex = currentLineIndex + 1;
+          setCurrentLineIndex(nextIndex);
+          setUserInput('');       // Clear text
+          setShowInput(false);    // Hide box
+          setAnswered(false);    // Reset answered state
+          player.playVideo();     // Resume Video
+        } else {
+          alert("You finished the video!");
+        }
       } else {
-        alert("You finished the video!");
+        if (normalizeText(userInput) === normalizeText(translated_transcript[currentLineIndex])) {
+          setAnswered(true); // Mark current line as answered
+        }
       }
     }
   };
