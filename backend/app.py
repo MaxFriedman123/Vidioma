@@ -37,21 +37,6 @@ def get_transcript():
             for i in range(len(source_transcript)):
                 source_transcript[i].text = GoogleTranslator(source=source_transcript.language_code, target=fromLang).translate(source_transcript[i].text)
 
-        #source_transcript = YouTubeTranscriptApi().fetch(video_id, [fromLang])
-        """try:
-            
-        except:
-            # Fallback to the first available language (usually the video's native one)
-            try:
-                source_transcript = transcripts.find_transcript([fromLang])
-            except:
-                source_transcript = next(iter(transcripts))
-        transcript_data = source_transcript
-        if source_transcript.language_code != fromLang:
-            temp_translator = GoogleTranslator(source=source_transcript.language_code, target=fromLang)
-            texts = [line.text for line in transcript_data]
-            source_transcript = temp_translator.translate_batch(texts)"""
-
         translator = GoogleTranslator(source=fromLang, target=toLang)
         texts = [line.text for line in source_transcript]
         translations = translator.translate_batch(texts)
