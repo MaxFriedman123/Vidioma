@@ -50,6 +50,7 @@ const CustomSelect = ({ value, onChange, options }) => {
 };
 
 function App() {
+  const [isLoading, setIsLoading] = useState(false);
   const [url, setUrl] = useState('');
   const [translated_transcript, setTranslatedTranscript] = useState([]);
   const [transcript, setTranscript] = useState([]);
@@ -68,6 +69,7 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setIsLoading(true);
     try {
       const response = await axios.post('http://127.0.0.1:5000/api/transcript', { 
         url,
@@ -81,6 +83,8 @@ function App() {
       setShowInput(false);
     } catch (error) {
       console.error("Error:", error);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -97,6 +101,38 @@ function App() {
       .toLowerCase();                 // Make it all lowercase
   };
 
+  // 4. Calculate the Levenshtein distance (number of edits required)
+  const getLevenshteinDistance = (a, b) => {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
+    for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
+
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        if (b.charAt(i - 1) === a.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1, // substitution
+            matrix[i][j - 1] + 1,     // insertion
+            matrix[i - 1][j] + 1      // deletion
+          );
+        }
+      }
+    }
+    return matrix[b.length][a.length];
+  };
+
+  // 5. Convert that distance into a percentage (0.0 to 1.0)
+  const getSimilarity = (str1, str2) => {
+    const distance = getLevenshteinDistance(str1, str2);
+    const maxLength = Math.max(str1.length, str2.length);
+    if (maxLength === 0) return 1.0;
+    return (maxLength - distance) / maxLength;
+  };
   // ---------------------------------------------------------
   // THE BRAKE PEDAL (Auto-Pause Logic)
   // ---------------------------------------------------------
@@ -141,7 +177,7 @@ function App() {
           alert("You finished the video!");
         }
       } else {
-        if (normalizeText(userInput) === normalizeText(translated_transcript[currentLineIndex])) {
+        if (getSimilarity(normalizeText(userInput), normalizeText(translated_transcript[currentLineIndex])) >= 0.7) {
           setAnswered(true); // Mark current line as answered
         }
       }
@@ -205,7 +241,9 @@ function App() {
               </div>
 
               {/* Submit Button */}
-              <button type="submit" className="go-button">GO</button>
+              <button type="submit" className="go-button" disabled={isLoading}>
+                {isLoading ? <div className="button-spinner"></div> : 'GO'}
+              </button>
             </form>
           </div>
         )}
