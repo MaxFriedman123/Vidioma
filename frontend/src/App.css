@@ -171,6 +171,31 @@
   background-color: #6bc2d7;
 }
 
+/* ---------------------------------------------------
+   LOADING SPINNER STYLES
+--------------------------------------------------- */
+.button-spinner {
+  width: 20px;
+  height: 20px;
+  border: 3px solid rgba(0, 0, 0, 0.2);
+  border-radius: 50%;
+  border-top-color: #000;
+  animation: spin 1s ease-in-out infinite;
+  margin: 0 auto;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.go-button:disabled {
+  cursor: pointer;
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .search-box input {
   padding: 10px;
   width: 300px;
