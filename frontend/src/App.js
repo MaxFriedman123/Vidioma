@@ -224,14 +224,23 @@ function App() {
       interval = setInterval(async () => {
         const currentTime = await player.getCurrentTime();
         
-        // 1. Detect if the user scrubbed the timeline (jumped > 1.5 seconds)
-        if (Math.abs(currentTime - lastTimeRef.current) > 1.5) {
+        // 1. Detect if the user scrubbed the timeline (jumped > 0.2 seconds)
+        if (Math.abs(currentTime - lastTimeRef.current) > 0.2) {
           
-          // Find which transcript line belongs to this new time
+          // Find the correct transcript line for the new time.
+          // We want the FIRST line whose "effective end time" is AFTER the current time.
           let actualIndex = transcript.findIndex((line, index) => {
             const nextLine = transcript[index + 1];
-            // We are in this line if we are past its start, and haven't hit the next line's start
-            return currentTime >= line.start && (!nextLine || currentTime < nextLine.start);
+            
+            // Calculate when this line effectively ends
+            let effectiveEndTime = line.start + line.duration;
+            
+            // Account for overlaps: if this line bleeds into the next line, cap its end time
+            if (nextLine && effectiveEndTime > nextLine.start) {
+              effectiveEndTime = nextLine.start;
+            }
+            
+            return effectiveEndTime > currentTime;
           });
           
           // If they rewind to the very beginning before the first subtitle, default to 0
@@ -242,6 +251,13 @@ function App() {
           // If they jumped to a completely different line, resync the UI!
           if (actualIndex !== -1 && actualIndex !== currentLineIndex) {
             setCurrentLineIndex(actualIndex);
+            setShowInput(false);
+            setUserInput('');
+            setAnswered(false);
+          }
+
+          if (actualIndex === currentLineIndex) {
+            // If they scrubbed but stayed within the same line, just hide the input box and reset state
             setShowInput(false);
             setUserInput('');
             setAnswered(false);
