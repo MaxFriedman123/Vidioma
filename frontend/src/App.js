@@ -61,6 +61,8 @@ function App() {
   const [url, setUrl] = useState('');
   const [translatedTranscript, setTranslatedTranscript] = useState({});
   const fetchingRef = useRef(new Set()); // Tracks which lines are currently being fetched
+  const inputRef = useRef(null);
+  const lastTimeRef = useRef(0); // NEW: Tracks the time to detect scrubbing
   const [transcript, setTranscript] = useState([]);
   const [videoId, setVideoId] = useState('');
   const [player, setPlayer] = useState(null);
@@ -72,8 +74,6 @@ function App() {
   const [answered, setAnswered] = useState(false);
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
-
-  const inputRef = useRef(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -112,9 +112,11 @@ function App() {
     setTranscript([]);
     setTranslatedTranscript({});
     fetchingRef.current.clear();
+    lastTimeRef.current = 0;
     setCurrentLineIndex(0);
     setShowInput(false);
     setUserInput('');
+    setAnswered(false);
     setPlayer(null);
   };
   // 3. Helper function to strip line breaks, punctuation, and extra spaces
@@ -172,12 +174,18 @@ function App() {
     const indicesToTranslate = [];
     const textsToTranslate = [];
 
-    // Look at the current line + the next 2 lines ahead
-    for (let i = currentLineIndex; i <= currentLineIndex + 2; i++) {
-      if (i < transcript.length && !translatedTranscript[i] && !fetchingRef.current.has(i)) {
-        indicesToTranslate.push(i);
-        textsToTranslate.push(transcript[i].source);
-        fetchingRef.current.add(i); // Mark as fetching so we don't duplicate requests
+    if (currentLineIndex == 0 && !translatedTranscript[0] && !fetchingRef.current.has(0)) {
+      indicesToTranslate.push(0);
+      textsToTranslate.push(transcript[0].source);
+      fetchingRef.current.add(0);
+    } else {
+      // Look at the current line + the next 2 lines ahead
+      for (let i = currentLineIndex; i <= currentLineIndex + 2; i++) {
+        if (i < transcript.length && !translatedTranscript[i] && !fetchingRef.current.has(i)) {
+          indicesToTranslate.push(i);
+          textsToTranslate.push(transcript[i].source);
+          fetchingRef.current.add(i); // Mark as fetching so we don't duplicate requests
+        }
       }
     }
 
@@ -208,27 +216,55 @@ function App() {
   }, [currentLineIndex, transcript, toLang, fromLang, translatedTranscript]);
 
   // ---------------------------------------------------------
-  // THE BRAKE PEDAL (Auto-Pause Logic)
+  // THE BRAKE PEDAL (Auto-Pause & Sync Logic)
   // ---------------------------------------------------------
   useEffect(() => {
     let interval;
     if (player && transcript.length > 0) {
       interval = setInterval(async () => {
-        // We only check time if we are NOT already waiting for user input
+        const currentTime = await player.getCurrentTime();
+        
+        // 1. Detect if the user scrubbed the timeline (jumped > 1.5 seconds)
+        if (Math.abs(currentTime - lastTimeRef.current) > 1.5) {
+          
+          // Find which transcript line belongs to this new time
+          let actualIndex = transcript.findIndex((line, index) => {
+            const nextLine = transcript[index + 1];
+            // We are in this line if we are past its start, and haven't hit the next line's start
+            return currentTime >= line.start && (!nextLine || currentTime < nextLine.start);
+          });
+          
+          // If they rewind to the very beginning before the first subtitle, default to 0
+          if (actualIndex === -1 && currentTime < transcript[0].start) {
+            actualIndex = 0; 
+          }
+
+          // If they jumped to a completely different line, resync the UI!
+          if (actualIndex !== -1 && actualIndex !== currentLineIndex) {
+            setCurrentLineIndex(actualIndex);
+            setShowInput(false);
+            setUserInput('');
+            setAnswered(false);
+          }
+        }
+        
+        // Update the tracker for the next loop
+        lastTimeRef.current = currentTime;
+
+        // 2. The Auto-Pause Logic (Only runs if we aren't waiting for input)
         if (!showInput) {
-          const currentTime = await player.getCurrentTime();
           const currentLine = transcript[currentLineIndex];
           const endTime = 
           currentLineIndex < transcript.length - 1 && currentLine.start + currentLine.duration > transcript[currentLineIndex + 1].start 
-          ? transcript[currentLineIndex + 1].start-.2 
+          ? transcript[currentLineIndex + 1].start - .2 
           : Math.min(currentLine.start + currentLine.duration, player.getDuration());
-            // If we reached the end of the line...
+            
           if (currentTime >= endTime) {
-            player.pauseVideo();   // 1. Pause Video
-            setShowInput(true);    // 2. Show Input Box
+            player.pauseVideo();   
+            setShowInput(true);    
           }
         }
-      }, 100); // Check faster (every 0.1s) for better precision
+      }, 100); 
     }
     return () => clearInterval(interval);
   }, [player, transcript, currentLineIndex, showInput]);
@@ -251,7 +287,7 @@ function App() {
           alert("You finished the video!");
         }
       } else {
-        if (getSimilarity(normalizeText(userInput), normalizeText(translatedTranscript[currentLineIndex])) >= 0.7) {
+        if (getSimilarity(normalizeText(userInput), normalizeText(translatedTranscript[currentLineIndex])) >= 0.6) {
           setAnswered(true); // Mark current line as answered
         }
       }
