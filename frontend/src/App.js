@@ -59,7 +59,8 @@ const CustomSelect = ({ value, onChange, options }) => {
 function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [url, setUrl] = useState('');
-  const [translated_transcript, setTranslatedTranscript] = useState([]);
+  const [translatedTranscript, setTranslatedTranscript] = useState({});
+  const fetchingRef = useRef(new Set()); // Tracks which lines are currently being fetched
   const [transcript, setTranscript] = useState([]);
   const [videoId, setVideoId] = useState('');
   const [player, setPlayer] = useState(null);
@@ -84,7 +85,8 @@ function App() {
         to_lang: toLang
        });
       setTranscript(response.data.snippets); 
-      setTranslatedTranscript(response.data.translated_snippets);
+      setTranslatedTranscript({}); // Clear previous translations
+      fetchingRef.current.clear();
       setVideoId(response.data.video_id);
       setCurrentLineIndex(0); // Reset to start
       setShowInput(false);
@@ -108,10 +110,12 @@ function App() {
     setVideoId('');
     setUrl('');
     setTranscript([]);
-    setTranslatedTranscript([]);
+    setTranslatedTranscript({});
+    fetchingRef.current.clear();
     setCurrentLineIndex(0);
     setShowInput(false);
     setUserInput('');
+    setPlayer(null);
   };
   // 3. Helper function to strip line breaks, punctuation, and extra spaces
   const normalizeText = (text) => {
@@ -158,6 +162,51 @@ function App() {
     if (maxLength === 0) return 1.0;
     return (maxLength - distance) / maxLength;
   };
+
+  // ---------------------------------------------------------
+  // LAZY LOADING TRANSLATIONS (Fetch just-in-time)
+  // ---------------------------------------------------------
+  useEffect(() => {
+    if (transcript.length === 0) return;
+
+    const indicesToTranslate = [];
+    const textsToTranslate = [];
+
+    // Look at the current line + the next 2 lines ahead
+    for (let i = currentLineIndex; i <= currentLineIndex + 2; i++) {
+      if (i < transcript.length && !translatedTranscript[i] && !fetchingRef.current.has(i)) {
+        indicesToTranslate.push(i);
+        textsToTranslate.push(transcript[i].source);
+        fetchingRef.current.add(i); // Mark as fetching so we don't duplicate requests
+      }
+    }
+
+    // If we found lines that need translating, send them to our new endpoint
+    if (textsToTranslate.length > 0) {
+      console.log("Requesting translation for lines:", indicesToTranslate);
+      axios.post('http://127.0.0.1:5000/api/translate', {
+        text: textsToTranslate,
+        from_lang: fromLang,
+        to_lang: toLang
+      }).then(response => {
+        const newTranslations = response.data.translated_text;
+        
+        // Save the new translations into our dictionary object
+        setTranslatedTranscript(prev => {
+          const updated = { ...prev };
+          indicesToTranslate.forEach((idx, i) => {
+            updated[idx] = newTranslations[i];
+          });
+          return updated;
+        }); 
+      }).catch(err => {
+        console.error("Failed to fetch translation chunk:", err);
+        // Remove from the fetching set so it can try again later
+        indicesToTranslate.forEach(idx => fetchingRef.current.delete(idx));
+      });
+    }
+  }, [currentLineIndex, transcript, toLang, fromLang, translatedTranscript]);
+
   // ---------------------------------------------------------
   // THE BRAKE PEDAL (Auto-Pause Logic)
   // ---------------------------------------------------------
@@ -202,7 +251,7 @@ function App() {
           alert("You finished the video!");
         }
       } else {
-        if (getSimilarity(normalizeText(userInput), normalizeText(translated_transcript[currentLineIndex])) >= 0.7) {
+        if (getSimilarity(normalizeText(userInput), normalizeText(translatedTranscript[currentLineIndex])) >= 0.7) {
           setAnswered(true); // Mark current line as answered
         }
       }
@@ -299,7 +348,7 @@ function App() {
                       }
                     }}
                     onReady={(event) => setPlayer(event.target)}
-                  />
+                  />  
                 </div>
               </div>
 
@@ -309,9 +358,12 @@ function App() {
                   <h2 className="current-text">
                     {transcript[currentLineIndex].source}
                   </h2>
-                  <h2 className="current-text">
-                    {translated_transcript[currentLineIndex]}
-                  </h2>
+                  <h2 className="current-text" style={{ color: '#aaa' }}>
+                  {/* Show a quick loading state if the translation isn't back from the server yet */}
+                  {translatedTranscript[currentLineIndex] === undefined 
+                    ? "Translating..." 
+                    : translatedTranscript[currentLineIndex]}
+                </h2>
 
                   {showInput ? (
                     <div className="input-container">
