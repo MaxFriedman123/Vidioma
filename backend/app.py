@@ -13,9 +13,6 @@ def extract_video_id(url):
     elif 'youtu.be' in url:
         return url.split('/')[-1]
     return url
-@app.route('/')
-def home():
-    return {"message": "Welcome to the backend API!"}
 
 @app.route('/api/transcript', methods=['POST'])
 def get_transcript():
@@ -30,17 +27,18 @@ def get_transcript():
         
         video_id=extract_video_id(video_url)
         transcripts = YouTubeTranscriptApi().list(video_id)
-        if fromLang in [t.language_code for t in transcripts]:
-            source_transcript = transcripts.find_transcript([fromLang]).fetch()
-        else:
+        source_transcript = None
+
+        for transcript in transcripts:
+            if transcript.language_code == fromLang:
+                source_transcript = transcript.fetch()
+                break
+        if not source_transcript:
             source_transcript = next(iter(transcripts)).fetch()
             for i in range(len(source_transcript)):
                 source_transcript[i].text = GoogleTranslator(source=source_transcript.language_code, target=fromLang).translate(source_transcript[i].text)
-
+                
         translator = GoogleTranslator(source=fromLang, target=toLang)
-        texts = [line.text for line in source_transcript]
-        translations = translator.translate_batch(texts)
-
         cleaned_snippets = []
         translated_snippets = []
         for i in range(len(source_transcript)):
@@ -54,7 +52,7 @@ def get_transcript():
                 'start': source_transcript[i].start,
                 'duration': source_transcript[i].duration
             })
-            translated_snippets.append(translations[i])
+            translated_snippets.append(translator.translate(text))
         return jsonify({
             "video_id": video_id,
             "snippets": cleaned_snippets,

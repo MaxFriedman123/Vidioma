@@ -9,6 +9,7 @@ const languages = [
   { code: 'es', name: 'Spanish', icon: 'https://flagcdn.com/w40/es.png' },
   { code: 'fr', name: 'French', icon: 'https://flagcdn.com/w40/fr.png' },
   { code: 'de', name: 'German', icon: 'https://flagcdn.com/w40/de.png' },
+  { code: 'iw', name: 'Hebrew', icon: 'https://flagcdn.com/w40/il.png' },
 ];
 
 // 2. Custom Dropdown Component to handle images
@@ -88,6 +89,24 @@ function App() {
     }
   };
 
+  // ---------------------------------------------------------
+  // THE REVERSE GEAR (Go back to home)
+  // ---------------------------------------------------------
+  const handleBack = () => {
+    // Pause the video if it's playing
+    if (player) {
+      player.pauseVideo();
+    }
+    
+    // Reset all state variables back to default
+    setVideoId('');
+    setUrl('');
+    setTranscript([]);
+    setTranslatedTranscript([]);
+    setCurrentLineIndex(0);
+    setShowInput(false);
+    setUserInput('');
+  };
   // 3. Helper function to strip line breaks, punctuation, and extra spaces
   const normalizeText = (text) => {
     if (!text) return '';
@@ -250,60 +269,69 @@ function App() {
 
         {/* TRANSCRIPT & VIDEO UI (Hides title and search bar when active) */}
         {videoId && (
-          <div className="content-area">
-            {/* Video Player */}
-            <div className="video-section">
-              <div className="video-wrapper">
-                <YouTube 
-                  videoId={videoId} 
-                  opts={{ 
-                    height: '390', 
-                    width: '640',
-                    playerVars: {
-                      rel: 0, 
-                      modestbranding: 1, 
-                      autoplay: 1, 
-                    }
-                  }}
-                  onReady={(event) => setPlayer(event.target)}
-                />
-                {showInput && <div className="video-curtain" />}
-              </div>
-            </div>
-
-            {/* Focus Mode Display */}
-            {transcript.length > 0 && (
-              <div className="focus-card">
-                <h2 className="current-text">
-                  {transcript[currentLineIndex].source}
-                </h2>
-                <h2 className="current-text">
-                  {translated_transcript[currentLineIndex]}
-                </h2>
-
-                {showInput ? (
-                  <div className="input-container">
-                    <input 
-                      ref={inputRef}
-                      type="text" 
-                      className="big-input"
-                      placeholder="Type translation..." 
-                      value={userInput}
-                      onChange={(e) => setUserInput(e.target.value)}
-                      onKeyDown={handleInputSubmit}
-                    />
-                    <p className="hint">Press Enter to continue</p>
-                  </div>
-                ) : (
-                  <p className="listening-indicator">👂 Listening...</p>
-                )}
-
-                <div className="progress">
-                  Line {currentLineIndex + 1} of {transcript.length}
+          <>
+            {/* The New Back Button */}
+            <button className="back-button" onClick={handleBack}>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
+              </svg>
+              Back to Search
+            </button>
+            <div className="content-area">
+              {/* Video Player */}
+              <div className="video-section">
+                <div className="video-wrapper">
+                  <YouTube 
+                    videoId={videoId} 
+                    opts={{ 
+                      height: '390', 
+                      width: '640',
+                      playerVars: {
+                        rel: 0, 
+                        modestbranding: 1, 
+                        autoplay: 1, 
+                      }
+                    }}
+                    onReady={(event) => setPlayer(event.target)}
+                  />
+                  {showInput && <div className="video-curtain" />}
                 </div>
               </div>
-            )}
-          </div>
+
+              {/* Focus Mode Display */}
+              {transcript.length > 0 && (
+                <div className="focus-card">
+                  <h2 className="current-text">
+                    {transcript[currentLineIndex].source}
+                  </h2>
+                  <h2 className="current-text">
+                    {translated_transcript[currentLineIndex]}
+                  </h2>
+
+                  {showInput ? (
+                    <div className="input-container">
+                      <input 
+                        ref={inputRef}
+                        type="text" 
+                        className="big-input"
+                        placeholder="Type translation..." 
+                        value={userInput}
+                        onChange={(e) => setUserInput(e.target.value)}
+                        onKeyDown={handleInputSubmit}
+                      />
+                      <p className="hint">Press Enter to continue</p>
+                    </div>
+                  ) : (
+                    <p className="listening-indicator">👂 Listening...</p>
+                  )}
+
+                  <div className="progress">
+                    Line {currentLineIndex + 1} of {transcript.length}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
         )}
       </header>
     </div>
