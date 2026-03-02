@@ -213,6 +213,34 @@
   font-weight: bold;
 }
 
+/* ---------------------------------------------------
+   BACK BUTTON STYLES
+--------------------------------------------------- */
+.back-button {
+  position: absolute;
+  top: 30px;
+  left: 30px;
+  background-color: #7dd3e8; 
+  color: #000;               
+  font-weight: 800;          
+  font-size: 0.85rem;        /* Smaller font size */
+  border: none;
+  border-radius: 6px;        /* Slightly sharper corners for a smaller button */
+  height: 36px;              /* Shorter height (down from 50px) */
+  padding: 0 16px;           /* Less side padding */
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;                  /* Tighter gap between the arrow and text */
+  transition: background-color 0.2s ease, transform 0.2s ease;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.2); 
+}
+
+.back-button:hover {
+  background-color: #6bc2d7; 
+  transform: translateX(-3px); 
+}
+
 .content-area {
   display: flex;
   flex-direction: row; /* Stack video on top of text */
