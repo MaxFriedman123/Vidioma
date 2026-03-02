@@ -2,17 +2,6 @@
   text-align: center;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
 .App-header {
   background-color: #2b2d35; /* Darker slate gray */
   min-height: 100vh;
@@ -23,10 +12,6 @@
   font-size: calc(10px + 2vmin);
   color: white;
   position: relative; /* Needed for absolute positioning the sparkle */
-}
-
-.App-link {
-  color: #61dafb;
 }
 
 .landing-container {
@@ -131,6 +116,16 @@
   width: 120px;
   z-index: 10;
   overflow: hidden;
+  max-height: 200px; 
+  overflow-y: auto;
+}
+
+.custom-select-dropdown::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-select-dropdown::-webkit-scrollbar-thumb {
+  background-color: #ccc;
+  border-radius: 4px;
 }
 
 .custom-select-option {
@@ -194,23 +189,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.search-box input {
-  padding: 10px;
-  width: 300px;
-  border-radius: 5px;
-  border: none;
-}
-
-.search-box button {
-  padding: 10px 20px;
-  margin-left: 10px;
-  background-color: #61dafb;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  font-weight: bold;
 }
 
 /* ---------------------------------------------------
@@ -321,37 +299,6 @@
   font-style: italic;
   color: #aaa;
   animation: pulse 1.5s infinite;
-}
-
-.language-indicator {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 15px;
-  margin-bottom: 20px;
-  background: #3d3d3d;
-  padding: 10px 20px;
-  border-radius: 30px;
-}
-
-.lang-dropdown {
-  background: transparent;
-  color: white;
-  border: none;
-  font-size: 1.2rem;
-  cursor: pointer;
-  outline: none;
-  appearance: none; /* Removes the default arrow */
-  text-align: center;
-}
-
-.lang-dropdown:hover {
-  color: #61dafb;
-}
-
-.arrow {
-  color: #61dafb;
-  font-weight: bold;
 }
 
 @keyframes pulse {

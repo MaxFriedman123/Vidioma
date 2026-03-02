@@ -10,6 +10,12 @@ const languages = [
   { code: 'fr', name: 'French', icon: 'https://flagcdn.com/w40/fr.png' },
   { code: 'de', name: 'German', icon: 'https://flagcdn.com/w40/de.png' },
   { code: 'iw', name: 'Hebrew', icon: 'https://flagcdn.com/w40/il.png' },
+  { code: 'it', name: 'Italian', icon: 'https://flagcdn.com/w40/it.png' },
+  { code: 'pt', name: 'Portuguese', icon: 'https://flagcdn.com/w40/br.png' },
+  { code: 'ja', name: 'Japanese', icon: 'https://flagcdn.com/w40/jp.png' },
+  { code: 'ko', name: 'Korean', icon: 'https://flagcdn.com/w40/kr.png' },
+  { code: 'zh', name: 'Chinese', icon: 'https://flagcdn.com/w40/cn.png' },
+  { code: 'ru', name: 'Russian', icon: 'https://flagcdn.com/w40/ru.png' },
 ];
 
 // 2. Custom Dropdown Component to handle images
@@ -294,7 +300,6 @@ function App() {
                     }}
                     onReady={(event) => setPlayer(event.target)}
                   />
-                  {showInput && <div className="video-curtain" />}
                 </div>
               </div>
 
