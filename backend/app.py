@@ -35,12 +35,8 @@ def get_transcript():
                 break
         if not source_transcript:
             source_transcript = next(iter(transcripts)).fetch()
-            """for i in range(len(source_transcript)):
-                source_transcript[i].text = GoogleTranslator(source=source_transcript.language_code, target=fromLang).translate(source_transcript[i].text)"""
-
-        #translator = GoogleTranslator(source=fromLang, target=toLang)
+           
         cleaned_snippets = []
-        #translated_snippets = []
         for i in range(len(source_transcript)):
             text=source_transcript[i].text
             if text.startswith('[') or text.startswith('('):
@@ -52,11 +48,9 @@ def get_transcript():
                 'start': source_transcript[i].start,
                 'duration': source_transcript[i].duration
             })
-            #translated_snippets.append(translator.translate(text))
         return jsonify({
             "video_id": video_id,
             "snippets": cleaned_snippets,
-            #"translated_snippets": translated_snippets
         })
     except Exception as e:
         print(f"Error: {e}")

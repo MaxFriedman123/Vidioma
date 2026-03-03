@@ -5,7 +5,7 @@ BASE_URL = "http://127.0.0.1:5000"
 print("--- Step 1: Testing /api/transcript ---")
 transcript_payload = {
     "url": "https://www.youtube.com/watch?v=FD3cN1rUOYo", 
-    "from_lang": "es"
+    "from_lang": "en",
 }
 
 try:
@@ -23,8 +23,8 @@ try:
         print("\n--- Step 2: Testing /api/translate ---")
         translate_payload = {
             "text": texts_to_translate,
-            "from_lang": "es",
-            "to_lang": "en"
+            "from_lang": "en",
+            "to_lang": "zh-CN"
         }
         
         # 2. Fetch the translations for those specific lines

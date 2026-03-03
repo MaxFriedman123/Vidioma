@@ -14,7 +14,7 @@ const languages = [
   { code: 'pt', name: 'Portuguese', icon: 'https://flagcdn.com/w40/br.png' },
   { code: 'ja', name: 'Japanese', icon: 'https://flagcdn.com/w40/jp.png' },
   { code: 'ko', name: 'Korean', icon: 'https://flagcdn.com/w40/kr.png' },
-  { code: 'zh', name: 'Chinese', icon: 'https://flagcdn.com/w40/cn.png' },
+  { code: 'zh-CN', name: 'Chinese', icon: 'https://flagcdn.com/w40/cn.png' },
   { code: 'ru', name: 'Russian', icon: 'https://flagcdn.com/w40/ru.png' },
 ];
 
@@ -62,16 +62,20 @@ function App() {
   const [translatedTranscript, setTranslatedTranscript] = useState({});
   const fetchingRef = useRef(new Set()); // Tracks which lines are currently being fetched
   const inputRef = useRef(null);
-  const lastTimeRef = useRef(0); // NEW: Tracks the time to detect scrubbing
+  const lastTimeRef = useRef(0); // Tracks the time to detect scrubbing
   const [transcript, setTranscript] = useState([]);
   const [videoId, setVideoId] = useState('');
   const [player, setPlayer] = useState(null);
+  const [isFinished, setIsFinished] = useState(false); // Tracks if the video is done
+  const [revealPos, setRevealPos] = useState({ x: -999, y: -999 });
+  const revealRef = useRef(null);
   
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
   const [showInput, setShowInput] = useState(false);
   const [answered, setAnswered] = useState(false);
+  const [isError, setIsError] = useState(false); // Tracks wrong answers
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
 
@@ -90,6 +94,9 @@ function App() {
       setVideoId(response.data.video_id);
       setCurrentLineIndex(0); // Reset to start
       setShowInput(false);
+      setAnswered(false);
+      setIsError(false);
+      setIsFinished(false);
     } catch (error) {
       console.error("Error:", error);
     } finally {
@@ -117,6 +124,8 @@ function App() {
     setShowInput(false);
     setUserInput('');
     setAnswered(false);
+    setIsError(false);
+    setIsFinished(false);
     setPlayer(null);
   };
   // 3. Helper function to strip line breaks, punctuation, and extra spaces
@@ -300,12 +309,17 @@ function App() {
           setAnswered(false);    // Reset answered state
           player.playVideo();     // Resume Video
         } else {
-          alert("You finished the video!");
+          setIsFinished(true); // Mark the video as finished
+          player.pauseVideo(); // Just to be safe, ensure the video is paused at the end
         }
       } else {
         if (getSimilarity(normalizeText(userInput), normalizeText(translatedTranscript[currentLineIndex])) >= 0.6) {
           setAnswered(true); // Mark current line as answered
+          setIsError(false); // Clear any previous error state
+        } else {
+          setIsError(true); // Mark as error to show red border
         }
+
       }
     }
   };
@@ -316,6 +330,35 @@ function App() {
       inputRef.current.focus();
     }
   }, [showInput]);
+
+  // Updates the coordinates for the flashlight reveal effect
+  const handleMouseMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setRevealPos({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    });
+  };
+
+  // GLOBAL MOUSE TRACKER
+  useEffect(() => {
+    const handleGlobalMouseMove = (e) => {
+      if (revealRef.current) {
+        // Get the exact position of the text container on the screen
+        const rect = revealRef.current.getBoundingClientRect();
+        
+        // Calculate where the mouse is relative to the top-left of the text container
+        setRevealPos({
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+        });
+      }
+    };
+
+    // Attach to the whole window instead of just the div
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
+  }, []);
 
   // ---------------------------------------------------------
   // RENDER
@@ -406,29 +449,80 @@ function App() {
 
               {/* Focus Mode Display */}
               {transcript.length > 0 && (
+                isFinished ? (
+                  <div className="focus-card victory-card">
+                    <h1 className="victory-title">🎉 You Did It!</h1>
+                    <p className="victory-subtitle">
+                      Awesome job! You successfully translated all <strong>{transcript.length}</strong> lines of this video.
+                    </p>
+                    <button className="go-button victory-button" onClick={handleBack}>
+                      Translate Another Video
+                    </button>
+                  </div>
+                ) : (
                 <div className="focus-card">
                   <h2 className="current-text">
                     {transcript[currentLineIndex].source}
                   </h2>
-                  <h2 className="current-text" style={{ color: '#aaa' }}>
-                  {/* Show a quick loading state if the translation isn't back from the server yet */}
-                  {translatedTranscript[currentLineIndex] === undefined 
-                    ? "Translating..." 
-                    : translatedTranscript[currentLineIndex]}
-                </h2>
+                  {/* The Flashlight Reveal Container */}
+                  <div 
+                    className="reveal-container"
+                    ref={revealRef}
+                  >
+                    {/* Layer 1: The Base Text (Blurred unless answered) */}
+                    <h2 
+                      className="current-text" 
+                      style={{ 
+                        color: answered ? '#a8e6cf' : '#aaa',
+                        filter: answered ? 'none' : 'blur(8px)',
+                        transition: 'color 0.3s ease',
+                        userSelect: answered ? 'auto' : 'none',
+                        marginBottom: 0
+                      }}
+                    >
+                      {translatedTranscript[currentLineIndex] === undefined 
+                        ? "Translating..." 
+                        : translatedTranscript[currentLineIndex]}
+                    </h2>
+
+                    {/* Layer 2: The Clear Text (Masked globally by the mouse position) */}
+                    {!answered && translatedTranscript[currentLineIndex] !== undefined && (
+                      <h2 
+                        className="current-text clear-flashlight-layer"
+                        style={{
+                          WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
+                          maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`
+                          // We deleted the opacity line here! The mask handles hiding it entirely.
+                        }}
+                      >
+                        {translatedTranscript[currentLineIndex]}
+                      </h2>
+                    )}
+                  </div>
 
                   {showInput ? (
                     <div className="input-container">
                       <input 
                         ref={inputRef}
                         type="text" 
-                        className="big-input"
+                        // Add the error class if isError is true
+                        className={`big-input ${isError ? 'input-error' : ''}`}
                         placeholder="Type translation..." 
                         value={userInput}
-                        onChange={(e) => setUserInput(e.target.value)}
+                        onChange={(e) => {
+                          setUserInput(e.target.value);
+                          if (isError) setIsError(false); // Instantly clear red state when they start typing
+                        }}
                         onKeyDown={handleInputSubmit}
+                        readOnly={answered} 
                       />
-                      <p className="hint">Press Enter to continue</p>
+                      <p className="hint">
+                        {answered 
+                          ? "Correct! Press Enter to resume." 
+                          : isError 
+                            ? "Not quite! Give it another try." // Give a helpful hint when wrong
+                            : "Press Enter to check."}
+                      </p>
                     </div>
                   ) : (
                     <p className="listening-indicator">👂 Listening...</p>
@@ -438,7 +532,8 @@ function App() {
                     Line {currentLineIndex + 1} of {transcript.length}
                   </div>
                 </div>
-              )}
+              )
+            )}
             </div>
           </>
         )}
