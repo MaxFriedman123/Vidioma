@@ -192,12 +192,97 @@
 }
 
 /* ---------------------------------------------------
+   ERROR SHAKE ANIMATION
+--------------------------------------------------- */
+.input-error {
+  border: 2px solid #ff4d4d !important;
+  background-color: rgba(255, 77, 77, 0.05) !important;
+  color: #ffb3b3 !important;
+  animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+@keyframes shake {
+  10%, 90% { transform: translate3d(-1px, 0, 0); }
+  20%, 80% { transform: translate3d(2px, 0, 0); }
+  30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
+  40%, 60% { transform: translate3d(4px, 0, 0); }
+}
+
+/* ---------------------------------------------------
+   VICTORY SCREEN STYLES
+--------------------------------------------------- */
+.victory-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 20px !important;
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+.victory-title {
+  font-size: 2.5rem;
+  margin-bottom: 10px;
+  background: linear-gradient(90deg, #a8e6cf, #6bc2d7);
+  -webkit-background-clip: text; /* For Safari/Older Chrome */
+  background-clip: text;         /* The official standard (Add this line!) */
+  -webkit-text-fill-color: transparent;
+}
+
+.victory-subtitle {
+  font-size: 1.2rem;
+  color: #ccc;
+  margin-bottom: 30px;
+  line-height: 1.5;
+}
+
+.victory-button {
+  border-radius: 8px !important; /* Forces rounded corners on all sides */
+  height: 50px;
+  padding: 0 30px;
+  font-size: 1.1rem;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------------------------------------------------
+   FLASHLIGHT REVEAL STYLES
+--------------------------------------------------- */
+.reveal-container {
+  position: relative;
+  margin-bottom: 20px;
+  min-height: 40px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+}
+
+.reveal-container .current-text {
+  margin-bottom: 0; /* Override the default margin so the layers stack cleanly */
+  width: 100%;
+}
+
+.clear-flashlight-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: #fff !important; /* Makes the revealed text bright white to stand out */
+  pointer-events: none; /* Prevents the top layer from blocking mouse tracking */
+  transition: opacity 0.2s ease;
+}
+
+/* ---------------------------------------------------
    BACK BUTTON STYLES
 --------------------------------------------------- */
 .back-button {
   position: absolute;
-  top: 30px;
-  left: 30px;
+  top: 15px;
+  left: 10px;
   background-color: #7dd3e8; 
   color: #000;               
   font-weight: 800;          
