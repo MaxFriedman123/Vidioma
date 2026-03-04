@@ -83,7 +83,7 @@ function App() {
     e.preventDefault();
     setIsLoading(true);
     try {
-      const response = await axios.post('http://127.0.0.1:5000/api/transcript', { 
+      const response = await axios.post('https://vidioma.onrender.com/api/transcript', { 
         url,
         from_lang: fromLang,
         to_lang: toLang
@@ -201,7 +201,7 @@ function App() {
     // If we found lines that need translating, send them to our new endpoint
     if (textsToTranslate.length > 0) {
       console.log("Requesting translation for lines:", indicesToTranslate);
-      axios.post('http://127.0.0.1:5000/api/translate', {
+      axios.post('https://vidioma.onrender.com/api/translate', {
         text: textsToTranslate,
         from_lang: fromLang,
         to_lang: toLang
