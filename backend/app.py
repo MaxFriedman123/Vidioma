@@ -30,8 +30,7 @@ def get_transcript():
             return jsonify({"error": "URL is required"}), 400
         
         video_id=extract_video_id(video_url)
-        ytt_api = YouTubeTranscriptApi(cookies='cookies.txt')
-        transcripts = ytt_api.list(video_id)
+        transcripts = YouTubeTranscriptApi().list(video_id, cookies='cookies.txt')
         source_transcript = None
 
         for transcript in transcripts:
