@@ -7,6 +7,10 @@ from deep_translator import GoogleTranslator
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/')
+def home():
+    return "Vidioma Backend is Awake!"
+
 def extract_video_id(url):
     if 'v=' in url:
         return url.split('v=')[1].split('&')[0]
