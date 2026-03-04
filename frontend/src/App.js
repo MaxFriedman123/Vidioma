@@ -183,7 +183,7 @@ function App() {
     const indicesToTranslate = [];
     const textsToTranslate = [];
 
-    if (currentLineIndex == 0 && !translatedTranscript[0] && !fetchingRef.current.has(0)) {
+    if (currentLineIndex === 0 && !translatedTranscript[0] && !fetchingRef.current.has(0)) {
       indicesToTranslate.push(0);
       textsToTranslate.push(transcript[0].source);
       fetchingRef.current.add(0);
@@ -330,15 +330,6 @@ function App() {
       inputRef.current.focus();
     }
   }, [showInput]);
-
-  // Updates the coordinates for the flashlight reveal effect
-  const handleMouseMove = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    setRevealPos({
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    });
-  };
 
   // GLOBAL MOUSE TRACKER
   useEffect(() => {
