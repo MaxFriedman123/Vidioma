@@ -1,3 +1,7 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -31,11 +35,16 @@ def get_transcript():
         
         video_id = extract_video_id(video_url)
         
-        # --- 1. SET UP WEBSHARE PROXY ---
-        # Using the exact credentials from your dashboard
+        # --- 1. SECURE CREDENTIAL FETCHING ---
+        proxy_username = os.environ.get("WEBSHARE_USERNAME")
+        proxy_password = os.environ.get("WEBSHARE_PASSWORD")
+        
+        if not proxy_username or not proxy_password:
+            return jsonify({"error": "Proxy credentials missing from environment"}), 500
+
         proxy_config = WebshareProxyConfig(
-            proxy_username="zgehmkre-1", 
-            proxy_password="rxmx68c0wbym"
+            proxy_username=proxy_username, 
+            proxy_password=proxy_password
         )
         
         # --- 2. INITIALIZE API WITH PROXIES ---
