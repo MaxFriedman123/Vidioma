@@ -1,15 +1,18 @@
 import requests
 
-BASE_URL = "http://127.0.0.1:5000"
+# 1. Updated to point to your live Render backend
+BASE_URL = "https://vidioma.onrender.com"
 
 print("--- Step 1: Testing /api/transcript ---")
 transcript_payload = {
     "url": "https://www.youtube.com/watch?v=FD3cN1rUOYo", 
     "from_lang": "en",
+    "to_lang": "es" 
 }
 
 try:
     # 1. Fetch the raw transcript
+    print(f"Pinging {BASE_URL}/api/transcript...")
     transcript_response = requests.post(f"{BASE_URL}/api/transcript", json=transcript_payload)
     print("Transcript Status Code:", transcript_response.status_code)
     transcript_data = transcript_response.json()
@@ -28,15 +31,17 @@ try:
         }
         
         # 2. Fetch the translations for those specific lines
+        print(f"Pinging {BASE_URL}/api/translate...")
         translate_response = requests.post(f"{BASE_URL}/api/translate", json=translate_payload)
         print("Translate Status Code:", translate_response.status_code)
         translate_data = translate_response.json()
         
-        if "translations" in translate_data:
+        # 2. Updated key to match your app.py response ("translated_text")
+        if "translated_text" in translate_data:
             print("Success! Translations received:\n")
             for i, original in enumerate(texts_to_translate):
                 print(f"Original:   {original}")
-                print(f"Translated: {translate_data['translations'][i]}\n")
+                print(f"Translated: {translate_data['translated_text'][i]}\n")
         else:
             print("Translation Response Data:", translate_data)
             
@@ -44,6 +49,7 @@ try:
         print("Transcript Response Data:", transcript_data)
 
 except requests.exceptions.ConnectionError:
-    print("Connection Error: Is your Flask server currently running?")
+    # 3. Updated error message for the remote server
+    print("Connection Error: Could not reach Render. Is the server URL correct?")
 except Exception as e:
     print("An error occurred:", e)
