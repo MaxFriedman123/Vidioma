@@ -3,6 +3,8 @@ import axios from 'axios';
 import YouTube from 'react-youtube';
 import './App.css';
 
+const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+
 // 1. Updated Languages Array with Flag Image URLs
 const languages = [
   { code: 'en', name: 'English', icon: 'https://flagcdn.com/w40/us.png' },
@@ -83,7 +85,7 @@ function App() {
     e.preventDefault();
     setIsLoading(true);
     try {
-      const response = await axios.post('https://vidioma.onrender.com/api/transcript', { 
+      const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
         url,
         from_lang: fromLang,
         to_lang: toLang
@@ -200,8 +202,7 @@ function App() {
 
     // If we found lines that need translating, send them to our new endpoint
     if (textsToTranslate.length > 0) {
-      console.log("Requesting translation for lines:", indicesToTranslate);
-      axios.post('https://vidioma.onrender.com/api/translate', {
+      axios.post(`${API_BASE_URL}/api/translate`, {
         text: textsToTranslate,
         from_lang: fromLang,
         to_lang: toLang
