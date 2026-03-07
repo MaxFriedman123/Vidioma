@@ -3,3 +3,4 @@ flask-cors
 deep-translator
 youtube-transcript-api
 gunicorn
+python-dotenv
