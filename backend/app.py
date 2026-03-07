@@ -39,7 +39,9 @@ def get_transcript():
             'writesubtitles': True,
             'writeautomaticsub': True,
             'quiet': True,
-            'no_warnings': True
+            'no_warnings': True,
+            'ignoreerrors': True,  # FORCE it to ignore video format crashes
+            'extract_flat': 'in_playlist' 
         }
         
         # If you still want to bypass age-restrictions, yt-dlp can use your cookies.txt
