@@ -58,7 +58,7 @@ def get_transcript():
         
         # Note: .fetch() returns dictionaries, so we use ['text'] instead of .text
         for snippet in source_transcript:
-            text = snippet['text']
+            text = snippet.text
             
             if text.startswith('[') or text.startswith('('):
                 continue
@@ -67,8 +67,8 @@ def get_transcript():
                 
             cleaned_snippets.append({
                 'source': text,
-                'start': snippet['start'],
-                'duration': snippet['duration']
+                'start': snippet.start,
+                'duration': snippet.duration
             })
             
         return jsonify({
