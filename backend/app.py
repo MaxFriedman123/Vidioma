@@ -23,12 +23,45 @@ def extract_video_id(url):
         return url.split('/')[-1]
     return url
 
+def find_proper_transcript(ytt_api, video_id, fromLang):
+    transcripts = ytt_api.list(video_id)
+
+    # 1. Try to fetch direct transcript in requested language
+    try:
+        return ytt_api.fetch(video_id, languages=[fromLang])
+    except Exception as e:
+        print(f"No direct transcript in {fromLang}, attempting translation: {e}")
+
+    # 2. Try to fetch any transcript and automatically translate it
+    try:
+        untranslated_source_transcript = next(iter(transcripts))
+        return(untranslated_source_transcript.translate(fromLang))
+    except Exception as e:
+        print(f"Translation failed, attempting similar language translation: {e}")
+
+    # 3. Try to fetch transcript in English or Spanish and translate it
+    try:
+        untranslated_source_transcript = ytt_api.fetch(video_id, languages=['en', 'es'])
+        translator = GoogleTranslator(source=untranslated_source_transcript.language_code, target=fromLang)
+        return(translator.translate(untranslated_source_transcript.text))
+    except Exception as e:
+        print(f"No similar language, reverting to translation with random language: {e}")
+
+    # 4. Final fallback: Take any available transcript and manually translate it
+    try:
+        untranslated_source_transcript = next(iter(transcripts))
+        translator = GoogleTranslator(source=untranslated_source_transcript.language_code, target=fromLang)
+        return(translator.translate(untranslated_source_transcript.text))
+    except Exception as e:
+        print(f"Final fallback failed: {e}")
+    return None
+
 @app.route('/api/transcript', methods=['POST'])
 def get_transcript():
     try:
         data = request.get_json()
         video_url = data.get('url')
-        fromLang = data.get('from_lang', 'en')
+        from_lang = data.get('from_lang', 'en')
 
         if not video_url:
             return jsonify({"error": "URL is required"}), 400
@@ -50,22 +83,12 @@ def get_transcript():
         # --- 2. INITIALIZE API WITH PROXIES ---
         ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
         
-        # --- 3. FETCH TRANSCRIPTS (Bypassing IP Block!) ---
-        transcripts = ytt_api.list(video_id)
-        
-        source_transcript = None
-
-        for transcript in transcripts:
-            if transcript.language_code == fromLang:
-                source_transcript = transcript.fetch()
-                break
-                
-        if not source_transcript:
-            source_transcript = next(iter(transcripts)).fetch()
+        # --- 3. FETCH TRANSCRIPTS ---  
+        source_transcript = find_proper_transcript(ytt_api, video_id, from_lang)
             
         cleaned_snippets = []
         
-        # Note: .fetch() returns dictionaries, so we use ['text'] instead of .text
+        # Filter out non-dialogue text
         for snippet in source_transcript:
             text = snippet.text
             
@@ -95,13 +118,13 @@ def translate_text():
     try:
         data = request.get_json()
         text = data.get('text')
-        fromLang = data.get('from_lang', 'en')
-        toLang = data.get('to_lang', 'es')
+        from_lang = data.get('from_lang', 'en')
+        to_lang = data.get('to_lang', 'es')
 
         if not text:
             return jsonify({"error": "Text is required"}), 400
         
-        translator = GoogleTranslator(source=fromLang, target=toLang)
+        translator = GoogleTranslator(source=from_lang, target=to_lang)
         translated_text = translator.translate_batch(text)
         return jsonify({"translated_text": translated_text})
         
