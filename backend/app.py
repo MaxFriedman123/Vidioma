@@ -95,7 +95,7 @@ def translate_with_context(snippets, target_lang, source_lang='auto'):
     if len(snippets) == 1: 
         # Single snippet, translate directly
         text = snippets[0]['source']
-        translated_text = translator.translate(text)
+        translated_text = translator.translate(text)#######
         return [{
             'source': translated_text,
             'start': snippets[0]['start'],
@@ -226,4 +226,5 @@ def translate_text():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
