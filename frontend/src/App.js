@@ -85,11 +85,16 @@ function App() {
     e.preventDefault();
     setIsLoading(true);
     try {
+      console.log("Submitting URL:", url, "From:", fromLang, "To:", toLang, "API Base:", API_BASE_URL);
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
         url,
         from_lang: fromLang,
         to_lang: toLang
        });
+       console.log(response.data);
+       console.log(response.data.snippets)
+       console.log(response.data.video_id)
+       console.log(response.data.from_lang)
       setTranscript(response.data.snippets); 
       setTranslatedTranscript({}); // Clear previous translations
       fetchingRef.current.clear();
@@ -183,27 +188,41 @@ function App() {
     if (transcript.length === 0) return;
 
     const indicesToTranslate = [];
-    const textsToTranslate = [];
+    const snippetsToTranslate = [];
 
     if (currentLineIndex === 0 && !translatedTranscript[0] && !fetchingRef.current.has(0)) {
       indicesToTranslate.push(0);
-      textsToTranslate.push(transcript[0].source);
+      snippetsToTranslate.push({
+        'source': transcript[0].source,
+        'start': transcript[0].start,
+        'duration': transcript[0].duration
+      });
       fetchingRef.current.add(0);
+      /*indicesToTranslate.push(1);
+      textsToTranslate.push({
+        'source': transcript[1].source,
+        'start': transcript[1].start,
+        'duration': transcript[1].duration
+      });
+      fetchingRef.current.add(1);*/
     } else {
-      // Look at the current line + the next 2 lines ahead
-      for (let i = currentLineIndex; i <= currentLineIndex + 2; i++) {
-        if (i < transcript.length && !translatedTranscript[i] && !fetchingRef.current.has(i)) {
+      for (let i = 1; i < transcript.length; i++) {
+        if (!translatedTranscript[i] && !fetchingRef.current.has(i)) {
           indicesToTranslate.push(i);
-          textsToTranslate.push(transcript[i].source);
+          snippetsToTranslate.push({
+            'source': transcript[i].source,
+            'start': transcript[i].start,
+            'duration': transcript[i].duration
+          });
           fetchingRef.current.add(i); // Mark as fetching so we don't duplicate requests
         }
       }
     }
 
     // If we found lines that need translating, send them to our new endpoint
-    if (textsToTranslate.length > 0) {
+    if (snippetsToTranslate.length > 0) {
       axios.post(`${API_BASE_URL}/api/translate`, {
-        text: textsToTranslate,
+        text: snippetsToTranslate,
         from_lang: fromLang,
         to_lang: toLang
       }).then(response => {
@@ -213,7 +232,7 @@ function App() {
         setTranslatedTranscript(prev => {
           const updated = { ...prev };
           indicesToTranslate.forEach((idx, i) => {
-            updated[idx] = newTranslations[i];
+            updated[idx] = newTranslations[i].source;
           });
           return updated;
         }); 
