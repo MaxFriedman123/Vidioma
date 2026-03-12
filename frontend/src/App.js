@@ -5,7 +5,7 @@ import './App.css';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
-// 1. Updated Languages Array with Flag Image URLs
+// Languages Array with Flag Image URLs
 const languages = [
   { code: 'en', name: 'English', icon: 'https://flagcdn.com/w40/us.png' },
   { code: 'es', name: 'Spanish', icon: 'https://flagcdn.com/w40/es.png' },
@@ -20,7 +20,7 @@ const languages = [
   { code: 'ru', name: 'Russian', icon: 'https://flagcdn.com/w40/ru.png' },
 ];
 
-// 2. Custom Dropdown Component to handle images
+// Custom Dropdown Component to handle images
 const CustomSelect = ({ value, onChange, options }) => {
   const [isOpen, setIsOpen] = useState(false);
   const selectedOption = options.find(opt => opt.code === value);
@@ -58,6 +58,59 @@ const CustomSelect = ({ value, onChange, options }) => {
   );
 };
 
+// Extracts the 11-character video ID from any standard YouTube URL
+const extractVideoId = (url) => {
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+  const match = url.match(regExp);
+  return (match && match[2].length === 11) ? match[2] : null;
+};
+
+// Helper function to strip line breaks, punctuation, and extra spaces
+const normalizeText = (text) => {
+  if (!text) return '';
+  return text
+    .normalize("NFD") // Normalize accented characters
+    .replace(/[\u0300-\u036f]/g, "") // Remove diacritics
+    .replace(/[\n\r]+/g, ' ')       // Replace line breaks with spaces
+    .replace(/['".,/#!$%^&*;:{}=\-_`´ˆ˜¨~()¡¿?]/g, '') // Remove common punctuation
+    .replace(/\s{2,}/g, ' ')        // Replace multiple spaces with a single space
+    .trim()                         // Remove leading/trailing spaces
+    .toLowerCase();                 // Make it all lowercase
+};
+
+// Calculate the Levenshtein distance (number of edits required)
+const getLevenshteinDistance = (a, b) => {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
+  for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+};
+
+// Convert Levenshtein distance into a percentage (0.0 to 1.0)
+const getSimilarity = (str1, str2) => {
+  const distance = getLevenshteinDistance(str1, str2);
+  const maxLength = Math.max(str1.length, str2.length);
+  if (maxLength === 0) return 1.0;
+  return (maxLength - distance) / maxLength;
+};
+
 function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [url, setUrl] = useState('');
@@ -83,29 +136,36 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // Extract ID immediately
+    const extractedId = extractVideoId(url);
+    if (!extractedId) {
+      alert("Please enter a valid YouTube URL");
+      return;
+    }
+
+    setVideoId(extractedId); // Set video ID right away to load the player
     setIsLoading(true);
+
+    setTranscript([]); // Clear previous transcript
+    setTranslatedTranscript({}); // Clear previous translations
+    fetchingRef.current.clear();
+    setCurrentLineIndex(0); // Reset to start
+    setShowInput(false);
+    setAnswered(false);
+    setIsError(false);
+    setIsFinished(false);
+
     try {
-      console.log("Submitting URL:", url, "From:", fromLang, "To:", toLang, "API Base:", API_BASE_URL);
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
         url,
         from_lang: fromLang,
         to_lang: toLang
        });
-       console.log(response.data);
-       console.log(response.data.snippets)
-       console.log(response.data.video_id)
-       console.log(response.data.from_lang)
       setTranscript(response.data.snippets); 
-      setTranslatedTranscript({}); // Clear previous translations
-      fetchingRef.current.clear();
-      setVideoId(response.data.video_id);
-      setCurrentLineIndex(0); // Reset to start
-      setShowInput(false);
-      setAnswered(false);
-      setIsError(false);
-      setIsFinished(false);
     } catch (error) {
       console.error("Error:", error);
+      setIsError(true);
     } finally {
       setIsLoading(false);
     }
@@ -135,51 +195,6 @@ function App() {
     setIsFinished(false);
     setPlayer(null);
   };
-  // 3. Helper function to strip line breaks, punctuation, and extra spaces
-  const normalizeText = (text) => {
-    if (!text) return '';
-    return text
-      .normalize("NFD") // Normalize accented characters
-      .replace(/[\u0300-\u036f]/g, "") // Remove diacritics
-      .replace(/[\n\r]+/g, ' ')       // Replace line breaks with spaces
-      .replace(/['".,/#!$%^&*;:{}=\-_`´ˆ˜¨~()¡¿?]/g, '') // Remove common punctuation
-      .replace(/\s{2,}/g, ' ')        // Replace multiple spaces with a single space
-      .trim()                         // Remove leading/trailing spaces
-      .toLowerCase();                 // Make it all lowercase
-  };
-
-  // 4. Calculate the Levenshtein distance (number of edits required)
-  const getLevenshteinDistance = (a, b) => {
-    if (a.length === 0) return b.length;
-    if (b.length === 0) return a.length;
-
-    const matrix = [];
-    for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
-    for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
-
-    for (let i = 1; i <= b.length; i++) {
-      for (let j = 1; j <= a.length; j++) {
-        if (b.charAt(i - 1) === a.charAt(j - 1)) {
-          matrix[i][j] = matrix[i - 1][j - 1];
-        } else {
-          matrix[i][j] = Math.min(
-            matrix[i - 1][j - 1] + 1, // substitution
-            matrix[i][j - 1] + 1,     // insertion
-            matrix[i - 1][j] + 1      // deletion
-          );
-        }
-      }
-    }
-    return matrix[b.length][a.length];
-  };
-
-  // 5. Convert that distance into a percentage (0.0 to 1.0)
-  const getSimilarity = (str1, str2) => {
-    const distance = getLevenshteinDistance(str1, str2);
-    const maxLength = Math.max(str1.length, str2.length);
-    if (maxLength === 0) return 1.0;
-    return (maxLength - distance) / maxLength;
-  };
 
   // ---------------------------------------------------------
   // LAZY LOADING TRANSLATIONS (Fetch just-in-time)
@@ -190,32 +205,18 @@ function App() {
     const indicesToTranslate = [];
     const snippetsToTranslate = [];
 
-    if (currentLineIndex === 0 && !translatedTranscript[0] && !fetchingRef.current.has(0)) {
-      indicesToTranslate.push(0);
-      snippetsToTranslate.push({
-        'source': transcript[0].source,
-        'start': transcript[0].start,
-        'duration': transcript[0].duration
-      });
-      fetchingRef.current.add(0);
-      /*indicesToTranslate.push(1);
-      textsToTranslate.push({
-        'source': transcript[1].source,
-        'start': transcript[1].start,
-        'duration': transcript[1].duration
-      });
-      fetchingRef.current.add(1);*/
-    } else {
-      for (let i = 1; i < transcript.length; i++) {
-        if (!translatedTranscript[i] && !fetchingRef.current.has(i)) {
-          indicesToTranslate.push(i);
-          snippetsToTranslate.push({
-            'source': transcript[i].source,
-            'start': transcript[i].start,
-            'duration': transcript[i].duration
-          });
-          fetchingRef.current.add(i); // Mark as fetching so we don't duplicate requests
-        }
+    const LOOKAHEAD = 5; // How many lines to translate in advance
+    const endIndex = Math.min(currentLineIndex + LOOKAHEAD, transcript.length);
+    
+    for (let i = currentLineIndex; i < endIndex; i++) {
+      if (!translatedTranscript[i] && !fetchingRef.current.has(i)) {
+        indicesToTranslate.push(i);
+        snippetsToTranslate.push({
+          'source': transcript[i].source,
+          'start': transcript[i].start,
+          'duration': transcript[i].duration
+        });
+        fetchingRef.current.add(i); // Mark as fetching so we don't duplicate requests
       }
     }
 
@@ -459,7 +460,14 @@ function App() {
               </div>
 
               {/* Focus Mode Display */}
-              {transcript.length > 0 && (
+              {isLoading ? (
+                <div className="focus-card">
+                  <h2 className="current-text" style={{ color: '#aaa' }}>
+                    Loading transcript... 
+                    <div className="button-spinner" style={{ display: 'inline-block', marginLeft: '10px' }}></div>
+                  </h2>
+                </div>
+              ) : transcript.length > 0 && (
                 isFinished ? (
                   <div className="focus-card victory-card">
                     <h1 className="victory-title">🎉 You Did It!</h1>
