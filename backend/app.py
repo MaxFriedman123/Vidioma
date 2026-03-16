@@ -8,6 +8,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
 import re
 from deep_translator import GoogleTranslator
+from functools import lru_cache
 
 app = Flask(__name__)
 CORS(app)
@@ -24,84 +25,47 @@ def extract_video_id(url):
         return url.split('/')[-1]
     return url
 
-# This function implements the multi-tiered transcript fetching strategy
-def find_proper_transcript(ytt_api, video_id, fromLang):
+@lru_cache(maxsize=100)
+def get_cached_transcript(video_id, from_lang):
+    """
+    Fetches the transcript using Webshare proxies and caches the last 100 requests.
+    """
+    # 1. Retrieve credentials inside the function to avoid caching sensitive data
+    proxy_username = os.environ.get("WEBSHARE_USERNAME")
+    proxy_password = os.environ.get("WEBSHARE_PASSWORD")
+    
+    # 2. Validate that credentials are present
+    if not proxy_username or not proxy_password:
+        raise ValueError("Proxy credentials (WEBSHARE_USERNAME and WEBSHARE_PASSWORD) are not configured")
+    
+    # 3. Build the Webshare proxy URL
+    socks5_url = f"socks5://{proxy_username}-rotate:{proxy_password}@p.webshare.io:1080"
+    proxy_config = GenericProxyConfig(http_url=socks5_url, https_url=socks5_url)
+    
+    # 4. Initialize the API with proxies enabled
+    ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config) 
     transcripts = ytt_api.list(video_id)
-
-    # 1. Try to fetch direct transcript in requested language
+    
     try:
-        fetched = ytt_api.fetch(video_id, languages=[fromLang])
-        if fetched.language_code == fromLang:
-            transcript_snippets = []
-            for i in fetched.snippets:
-                transcript_snippets.append({
-                    'source': i.text,
-                    'start': i.start,
-                    'duration': i.duration
-                })
-            return transcript_snippets
-    except Exception as e:
-        print(f"No direct transcript in {fromLang}, attempting translation: {e}")
-
-    # 2. Try to fetch any transcript and automatically translate it
-    try:
-        untranslated_source_transcript = next(iter(transcripts))
-        fetched = untranslated_source_transcript.translate(fromLang).fetch()
-        if fetched.language_code == fromLang:
-            transcript_snippets = []
-            for i in fetched.snippets:
-                transcript_snippets.append({
-                    'source': i.text,
-                    'start': i.start,
-                    'duration': i.duration
-                })
-            return transcript_snippets
-    except Exception as e:
-        print(f"Translation failed, attempting similar language translation: {e}")
-
-    # 3. Try to fetch transcript in English or Spanish and translate it
-    try:
-        untranslated_source_transcript = ytt_api.fetch(video_id, languages=['en', 'es'])
-        transcript_snippets = []
-        for i in untranslated_source_transcript.snippets:
-            transcript_snippets.append({
-                'source': i.text,                    
-                'start': i.start,
-                'duration': i.duration
-            })
-        return(translate_with_context(transcript_snippets, fromLang))
-    except Exception as e:
-        print(f"No similar language, reverting to translation with random language: {e}")
-
-    # 4. Final fallback: Take any available transcript and manually translate it
-    try:
-        untranslated_source_transcript = next(iter(transcripts)).fetch()
-        transcript_snippets = []
-        for i in untranslated_source_transcript.snippets:
-            transcript_snippets.append({
-                'source': i.text,                    
-                'start': i.start,
-                'duration': i.duration
-            })
-        return(translate_with_context(transcript_snippets, fromLang))
-    except Exception as e:
-        print(f"Final fallback failed: {e}")
-    return None
+        # 5. Try to find the exact language first
+        return transcripts.find_transcript([from_lang]).fetch()
+    except Exception:
+        pass 
+        
+    # 6. If exact match fails, grab the first transcript available
+    source_transcript = next(iter(transcripts))
+    
+    # 7. SAFETY CHECK: If we asked for 'en' and the transcript is 'en-US', just use it!
+    if from_lang in source_transcript.language_code:
+        return source_transcript.fetch()
+        
+    # 8. If it's a completely different language, use YouTube auto-translate
+    return source_transcript.translate(from_lang).fetch()
 
 # This function translates snippets in batches to preserve context, then recombines them.
 def translate_with_context(snippets, target_lang, source_lang='auto'):
     translator = GoogleTranslator(source=source_lang, target=target_lang)
     
-    """if len(snippets) == 1: 
-        # Single snippet, translate directly
-        text = snippets[0]['source']
-        translated_text = translator.translate(text)#######
-        return [{
-            'source': translated_text,
-            'start': snippets[0]['start'],
-            'duration': snippets[0]['duration']
-        }]"""
-
     # [GGG] is the best delimiter from my tests
     delimiter = "[GGG]"
     max_chars = 4500 
@@ -158,33 +122,17 @@ def get_transcript():
         
         video_id = extract_video_id(video_url)
         
-        # --- 1. SECURE CREDENTIAL FETCHING ---
-        proxy_username = os.environ.get("WEBSHARE_USERNAME")
-        proxy_password = os.environ.get("WEBSHARE_PASSWORD")
+        # Call the cached function instead of hitting the network every time
+        source_transcript = get_cached_transcript(video_id, from_lang)
         
-        if not proxy_username or not proxy_password:
-            return jsonify({"error": "Proxy credentials missing from environment"}), 500
-
-        # Use SOCKS5 (port 1080) instead of HTTP CONNECT (port 80)
-        # because Webshare's HTTP proxy drops TLS handshakes through CONNECT tunnels
-        socks5_url = f"socks5://{proxy_username}-rotate:{proxy_password}@p.webshare.io:1080"
-        proxy_config = GenericProxyConfig(
-            http_url=socks5_url,
-            https_url=socks5_url
-        )
-        
-        # --- 2. INITIALIZE API WITH PROXIES ---
-        ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
-        
-        # --- 3. FETCH TRANSCRIPTS ---  
-        source_transcript = find_proper_transcript(ytt_api, video_id, from_lang)
         if not source_transcript:
-            return jsonify({"error": "Could not fetch or translate transcript"}), 500
+            return jsonify({"error": "Could not fetch transcript"}), 500
+            
         cleaned_snippets = []
         
         # Filter out non-dialogue text
         for snippet in source_transcript:
-            text = snippet['source'].strip()
+            text = snippet.text.strip() # Note: standard library uses 'text', not 'source'
             
             if text.startswith('[') or text.startswith('('):
                 continue
@@ -193,8 +141,8 @@ def get_transcript():
                 
             cleaned_snippets.append({
                 'source': text,
-                'start': snippet['start'],
-                'duration': snippet['duration']
+                'start': snippet.start,
+                'duration': snippet.duration
             })
             
         return jsonify({
@@ -227,4 +175,5 @@ def translate_text():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    is_dev = os.environ.get("FLASK_ENV") == "development"
+    app.run(host='0.0.0.0', port=port, debug=is_dev)
