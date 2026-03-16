@@ -48,7 +48,7 @@ def get_cached_transcript(video_id, from_lang):
     
     try:
         # 5. Try to find the exact language first
-        return transcripts.find_transcript([from_lang]).fetch()
+        return transcripts.find_transcript([from_lang]).fetch(), True
     except Exception:
         pass 
         
@@ -57,10 +57,14 @@ def get_cached_transcript(video_id, from_lang):
     
     # 7. SAFETY CHECK: If we asked for 'en' and the transcript is 'en-US', just use it!
     if from_lang in source_transcript.language_code:
-        return source_transcript.fetch()
+        return source_transcript.fetch(), True
         
     # 8. If it's a completely different language, use YouTube auto-translate
-    return source_transcript.translate(from_lang).fetch()
+    try:
+        return source_transcript.translate(from_lang).fetch(), True
+    except Exception as e:
+        print(f"Translation error: {e}")
+        return source_transcript.fetch(), False  # Fallback to original if translation fails
 
 # This function translates snippets in batches to preserve context, then recombines them.
 def translate_with_context(snippets, target_lang, source_lang='auto'):
@@ -123,7 +127,7 @@ def get_transcript():
         video_id = extract_video_id(video_url)
         
         # Call the cached function instead of hitting the network every time
-        source_transcript = get_cached_transcript(video_id, from_lang)
+        source_transcript, is_correct_lang = get_cached_transcript(video_id, from_lang)
         
         if not source_transcript:
             return jsonify({"error": "Could not fetch transcript"}), 500
@@ -144,7 +148,12 @@ def get_transcript():
                 'start': snippet.start,
                 'duration': snippet.duration
             })
-            
+
+        # If the language is incorrect, translate the snippets back to the requested language 
+        if not is_correct_lang:
+            print(f"Manually translating {video_id} to {from_lang}")
+            cleaned_snippets = translate_with_context(cleaned_snippets, from_lang)
+
         return jsonify({
             "video_id": video_id,
             "snippets": cleaned_snippets,
