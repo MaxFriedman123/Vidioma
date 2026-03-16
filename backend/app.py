@@ -92,7 +92,7 @@ def find_proper_transcript(ytt_api, video_id, fromLang):
 def translate_with_context(snippets, target_lang, source_lang='auto'):
     translator = GoogleTranslator(source=source_lang, target=target_lang)
     
-    if len(snippets) == 1: 
+    """if len(snippets) == 1: 
         # Single snippet, translate directly
         text = snippets[0]['source']
         translated_text = translator.translate(text)#######
@@ -100,10 +100,10 @@ def translate_with_context(snippets, target_lang, source_lang='auto'):
             'source': translated_text,
             'start': snippets[0]['start'],
             'duration': snippets[0]['duration']
-        }]
+        }]"""
 
-    # \n is the best delimiter because NMT engines treat it as a natural sentence break
-    delimiter = "\n"
+    # [GGG] is the best delimiter from my tests
+    delimiter = "[GGG]"
     max_chars = 4500 
     
     all_translated_texts = []
@@ -113,12 +113,11 @@ def translate_with_context(snippets, target_lang, source_lang='auto'):
     def process_chunk(texts_to_translate):
         combined_text = delimiter.join(texts_to_translate)
         translated_combined = translator.translate(combined_text)
-        return translated_combined.split(delimiter)
+        return re.split(r'\s*\[\s*GGG\s*\]\s*', translated_combined, flags=re.IGNORECASE)
 
     # 1. Group texts into chunks
     for snippet in snippets:
-        # We use dictionary access here because 'snippets' is our custom cleaned_snippets list
-        text = snippet['source']    
+        text = snippet['source'].replace('\n', ' ').strip()   
         if current_chunk_length + len(text) + len(delimiter) > max_chars:
             all_translated_texts.extend(process_chunk(current_chunk_texts))
             current_chunk_texts = [text]
@@ -134,7 +133,10 @@ def translate_with_context(snippets, target_lang, source_lang='auto'):
     # 3. Map translated texts back to the original timestamps
     translated_snippets = []
     for i, snippet in enumerate(snippets):
-        trans_text = all_translated_texts[i].strip() if i < len(all_translated_texts) else snippet['source']
+        if i < len(all_translated_texts):
+            trans_text = all_translated_texts[i].strip()
+        else:
+            trans_text = snippet['source'].replace('\n', ' ').strip()  # Fallback to original if translation is missing
         
         translated_snippets.append({
             'source': trans_text,
@@ -147,7 +149,6 @@ def translate_with_context(snippets, target_lang, source_lang='auto'):
 @app.route('/api/transcript', methods=['POST'])
 def get_transcript():
     try:
-        print("Received request for transcript")
         data = request.get_json()
         video_url = data.get('url')
         from_lang = data.get('from_lang', 'en')
@@ -211,20 +212,19 @@ def get_transcript():
 def translate_text():
     try:
         data = request.get_json()
-        text = data.get('text')
+        snippets = data.get('snippets')
         from_lang = data.get('from_lang', 'en')
         to_lang = data.get('to_lang', 'es')
-
-        if not text:
-            return jsonify({"error": "Text is required"}), 400
+        if not snippets:
+            return jsonify({"error": "Snippets are required"}), 400
         
-        translated_text = translate_with_context(text, to_lang, from_lang)
-        return jsonify({"translated_text": translated_text})
+        translated_snippets = translate_with_context(snippets, to_lang, from_lang)
+        return jsonify({"translated_snippets": translated_snippets})
         
     except Exception as e:
         print(f"Translate Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

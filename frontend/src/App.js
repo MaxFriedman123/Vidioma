@@ -223,11 +223,11 @@ function App() {
     // If we found lines that need translating, send them to our new endpoint
     if (snippetsToTranslate.length > 0) {
       axios.post(`${API_BASE_URL}/api/translate`, {
-        text: snippetsToTranslate,
+        snippets: snippetsToTranslate,
         from_lang: fromLang,
         to_lang: toLang
       }).then(response => {
-        const newTranslations = response.data.translated_text;
+        const newTranslations = response.data.translated_snippets;
         
         // Save the new translations into our dictionary object
         setTranslatedTranscript(prev => {
