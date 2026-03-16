@@ -1,48 +1,67 @@
 import requests
+import time
 
-BASE_URL = "https://vidioma.onrender.com"
+BASE_URL = "http://127.0.0.1:5000" 
+video_url = "https://www.youtube.com/watch?v=YICiHiU2GBU" 
+from_lang = "en"
+to_lang = "es"
 
-print("--- Step 1: Testing /api/transcript ---")
-transcript_payload = {
-    "url": "https://www.youtube.com/watch?v=FD3cN1rUOYo",
-    "from_lang": "en",
-    "to_lang": "es"
-}
+print("--- 1. Testing Transcript Latency ---")
 
-try:
-    print(f"Pinging {BASE_URL}/api/transcript...")
-    transcript_response = requests.post(f"{BASE_URL}/api/transcript", json=transcript_payload)
-    print("Transcript Status Code:", transcript_response.status_code)
-    transcript_data = transcript_response.json()
+# Start the timer
+start_time = time.time()
 
-    if "snippets" in transcript_data and len(transcript_data["snippets"]) > 0:
-        print(f"Success! Retrieved {len(transcript_data['snippets'])} lines.")
+response = requests.post(
+    f"{BASE_URL}/api/transcript", 
+    json={"url": video_url, "from_lang": from_lang}
+)
 
-        texts_to_translate = [snippet["source"] for snippet in transcript_data["snippets"][:3]]
+# Stop the timer
+end_time = time.time()
+elapsed_time = end_time - start_time
 
-        print("\n--- Step 2: Testing /api/translate ---")
-        translate_payload = {
-            "text": texts_to_translate,
-            "from_lang": "en",
-            "to_lang": "zh-CN"
-        }
+if response.status_code == 200:
+    print("RAW SERVER RESPONSE:")
+    print(response.text[:500])  # Prints the first 500 characters
+    transcript_data = response.json().get("snippets", [])
+    # ---------------------------
+    
+    print(f"Fetched {len(transcript_data)} snippets.")
+    print(f"Total Time Taken: {elapsed_time:.2f} seconds")
+else:
+    print(f"Error fetching transcript: {response.status_code}")
+    print(response.text)
+    exit()
 
-        print(f"Pinging {BASE_URL}/api/translate...")
-        translate_response = requests.post(f"{BASE_URL}/api/translate", json=translate_payload)
-        print("Translate Status Code:", translate_response.status_code)
-        translate_data = translate_response.json()
+print("\n--- 2. Testing Translation Endpoint ---")
+if not transcript_data:
+    print("No transcript data available to translate. Exiting.")
+    exit()
 
-        if "translated_text" in translate_data:
-            print("Success! Translations received:\n")
-            for i, original in enumerate(texts_to_translate):
-                print(f"Original:   {original}")
-                print(f"Translated: {translate_data['translated_text'][i]}\n")
-        else:
-            print("Translation Response Data:", translate_data)
-    else:
-        print("Transcript Response Data:", transcript_data)
+snippets_to_translate = transcript_data[:5]
+print(f"Sending the first {len(snippets_to_translate)} snippets to the translator...")
 
-except requests.exceptions.ConnectionError:
-    print("Connection Error: Could not reach Render. Is the server URL correct?")
-except Exception as e:
-    print("An error occurred:", e)
+start_trans_time = time.time()
+translate_response = requests.post(
+    f"{BASE_URL}/api/translate",
+    json={
+        "snippets": snippets_to_translate,
+        "from_lang": from_lang,
+        "to_lang": to_lang
+    }
+)
+end_trans_time = time.time()
+
+if translate_response.status_code == 200:
+    translation_data = translate_response.json()
+    translated_snippets = translation_data.get("translated_snippets", [])
+    
+    print(f"Translation Success! (Took {end_trans_time - start_trans_time:.2f} seconds)")
+    for i, translated_snippet in enumerate(translated_snippets):
+        original = snippets_to_translate[i]['source']
+        translated = translated_snippet['source']
+        print(f"EN: {original}")
+        print(f"ES: {translated}\n")
+else:
+    print(f"Error translating: {translate_response.status_code}")
+    print(translate_response.text)
