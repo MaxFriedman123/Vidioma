@@ -7,11 +7,24 @@ from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
 import re
+import json
+import hashlib
+import redis
 from deep_translator import GoogleTranslator
 from functools import lru_cache
 
 app = Flask(__name__)
 CORS(app)
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+REDIS_TTL_SECONDS = int(os.environ.get("REDIS_TTL_SECONDS", "86400"))
+
+try:
+    redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client.ping()  # Test connection
+except Exception as e:
+    print(f"Warning: Redis connection failed ({e}). Caching will be disabled.")
+    redis_client = None
 
 @app.route('/')
 def home():
@@ -145,6 +158,16 @@ def get_cached_processed_snippets(video_id, from_lang):
     return cleaned_snippets
 
 # This function translates snippets in batches to preserve context, then recombines them.
+def generate_cache_key(from_lang, to_lang, snippets):
+    """Generate a cache key for translation results."""
+    key_payload = {
+        "from": from_lang.lower(),
+        "to": to_lang.lower(),
+        "snippets": snippets
+    }
+    key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "translate:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+
 def translate_with_context(snippets, target_lang, source_lang='auto'):
     translator = GoogleTranslator(source=source_lang, target=target_lang)
 
@@ -248,9 +271,26 @@ def translate_text():
         if not snippets:
             return jsonify({"error": "Snippets are required"}), 400
         
-        translated_snippets = translate_with_context(snippets, to_lang, from_lang)
-        return jsonify({"translated_snippets": translated_snippets})
+        cache_key = generate_cache_key(from_lang, to_lang, snippets)
+        cached = None
+        if redis_client:
+            try:
+                cached = redis_client.get(cache_key)
+            except Exception as e:
+                print(f"Redis get error: {e}. Proceeding without cache.")
         
+        if cached:
+            return jsonify({"translated_snippets": json.loads(cached), "cache_hit": True})
+
+        translated_snippets = translate_with_context(snippets, to_lang, from_lang)
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, REDIS_TTL_SECONDS, json.dumps(translated_snippets, ensure_ascii=False))
+            except Exception as e:
+                print(f"Redis setex error: {e}. Continuing without cache.")
+
+        return jsonify({"translated_snippets": translated_snippets, "cache_hit": False})
+
     except Exception as e:
         print(f"Translate Error: {e}")
         return jsonify({"error": str(e)}), 500
