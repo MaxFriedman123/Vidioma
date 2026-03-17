@@ -2,9 +2,9 @@ import requests
 import time
 
 BASE_URL = "http://127.0.0.1:5000" 
-video_url = "https://www.youtube.com/watch?v=YICiHiU2GBU" 
-from_lang = "en"
-to_lang = "es"
+video_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw" 
+from_lang = "es"
+to_lang = "iw"
 
 print("--- 1. Testing Transcript Latency ---")
 
@@ -21,13 +21,8 @@ end_time = time.time()
 elapsed_time = end_time - start_time
 
 if response.status_code == 200:
-    print("RAW SERVER RESPONSE:")
-    print(response.text[:500])  # Prints the first 500 characters
     transcript_data = response.json().get("snippets", [])
-    # ---------------------------
-    
-    print(f"Fetched {len(transcript_data)} snippets.")
-    print(f"Total Time Taken: {elapsed_time:.2f} seconds")
+    print(f"Fetched {len(transcript_data)} snippets successfully! (Took {elapsed_time:.2f} seconds)")
 else:
     print(f"Error fetching transcript: {response.status_code}")
     print(response.text)
@@ -39,7 +34,6 @@ if not transcript_data:
     exit()
 
 snippets_to_translate = transcript_data[:5]
-print(f"Sending the first {len(snippets_to_translate)} snippets to the translator...")
 
 start_trans_time = time.time()
 translate_response = requests.post(
@@ -57,11 +51,6 @@ if translate_response.status_code == 200:
     translated_snippets = translation_data.get("translated_snippets", [])
     
     print(f"Translation Success! (Took {end_trans_time - start_trans_time:.2f} seconds)")
-    for i, translated_snippet in enumerate(translated_snippets):
-        original = snippets_to_translate[i]['source']
-        translated = translated_snippet['source']
-        print(f"EN: {original}")
-        print(f"ES: {translated}\n")
 else:
     print(f"Error translating: {translate_response.status_code}")
     print(translate_response.text)
