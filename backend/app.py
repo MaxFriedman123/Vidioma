@@ -41,7 +41,8 @@ def extract_video_id(url):
 @lru_cache(maxsize=100)
 def get_cached_transcript(video_id, from_lang):
     """
-    Fetch a transcript for the requested language.
+    Fetch a transcript for the requested language. Attempts a fast direct connection first,
+    falling back to a rotating proxy if YouTube blocks the request.
 
     Returns:
         (transcript_data, is_correct_lang)
@@ -51,67 +52,82 @@ def get_cached_transcript(video_id, from_lang):
         True  -> transcript is already in the requested language
         False -> transcript is from another language and should be manually translated
     """
-    proxy_username = os.environ.get("WEBSHARE_USERNAME")
-    proxy_password = os.environ.get("WEBSHARE_PASSWORD")
 
-    if not proxy_username or not proxy_password:
-        raise ValueError(
-            "Proxy credentials are not configured"
+    def attempt_fetch(api_instance):
+        available_transcripts = api_instance.list(video_id)
+
+        if not available_transcripts:
+            raise ValueError("No transcripts are available for this video")
+
+        requested = from_lang.lower()
+
+        def base_lang(code):
+            return code.lower().split("-")[0]
+
+        def sort_key(transcript):
+            # Prefer manual transcripts over auto-generated ones when possible
+            return (
+                getattr(transcript, "is_generated", False),
+                transcript.language_code.lower()
+            )
+
+        # 1. Exact match: en -> en
+        exact_match = next(
+            (t for t in available_transcripts if t.language_code.lower() == requested),
+            None
+        )
+        if exact_match:
+            return exact_match.fetch(), True
+
+        # 2. Regional/base-language match: en -> en-US, en-GB
+        regional_matches = [
+            t for t in available_transcripts
+            if base_lang(t.language_code) == requested
+        ]
+        if regional_matches:
+            best_match = sorted(regional_matches, key=sort_key)[0]
+            return best_match.fetch(), True
+
+        # 3. Try YouTube auto-translate from any translatable transcript
+        translatable_candidates = sorted(
+            [t for t in available_transcripts if getattr(t, "is_translatable", False)],
+            key=sort_key
         )
 
-    socks5_url = f"socks5://{proxy_username}-rotate:{proxy_password}@p.webshare.io:1080"
-    proxy_config = GenericProxyConfig(http_url=socks5_url, https_url=socks5_url)
+        for transcript in translatable_candidates:
+            try:
+                return transcript.translate(from_lang).fetch(), True
+            except Exception:
+                continue
 
-    ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
-    available_transcripts = ytt_api.list(video_id)
+        # 4. Final fallback: return the best available source transcript
+        fallback = sorted(available_transcripts, key=sort_key)[0]
+        return fallback.fetch(), False
 
-    if not available_transcripts:
-        raise ValueError("No transcripts are available for this video")
 
-    requested = from_lang.lower()
+    # --- Main execution flow: Direct fetch first, Proxy fallback second ---
 
-    def base_lang(code):
-        return code.lower().split("-")[0]
+    # 1. ATTEMPT FAST DIRECT CONNECTION FIRST
+    try:
+        print(f"Attempting direct fetch for {video_id} in {from_lang}...")
+        direct_api = YouTubeTranscriptApi()
+        return attempt_fetch(direct_api)
 
-    def sort_key(transcript):
-        # Prefer manual transcripts over auto-generated ones when possible
-        return (
-            getattr(transcript, "is_generated", False),
-            transcript.language_code.lower()
-        )
+    except Exception as e:
+        print(f"Direct fetch failed, falling back to proxy: {e}")
 
-    # 1. Exact match: en -> en
-    exact_match = next(
-        (t for t in available_transcripts if t.language_code.lower() == requested),
-        None
-    )
-    if exact_match:
-        return exact_match.fetch(), True
+        # 2. FALLBACK TO SLOW PROXY IF BLOCKED OR FAILED
+        proxy_username = os.environ.get("WEBSHARE_USERNAME")
+        proxy_password = os.environ.get("WEBSHARE_PASSWORD")
 
-    # 2. Regional/base-language match: en -> en-US, en-GB
-    regional_matches = [
-        t for t in available_transcripts
-        if base_lang(t.language_code) == requested
-    ]
-    if regional_matches:
-        best_match = sorted(regional_matches, key=sort_key)[0]
-        return best_match.fetch(), True
+        if not proxy_username or not proxy_password:
+            raise ValueError("Proxy credentials are not configured and direct fetch failed.")
 
-    # 3. Try YouTube auto-translate from any translatable transcript
-    translatable_candidates = sorted(
-        [t for t in available_transcripts if getattr(t, "is_translatable", False)],
-        key=sort_key
-    )
+        socks5_url = f"socks5://{proxy_username}-rotate:{proxy_password}@p.webshare.io:1080"
+        proxy_config = GenericProxyConfig(http_url=socks5_url, https_url=socks5_url)
 
-    for transcript in translatable_candidates:
-        try:
-            return transcript.translate(from_lang).fetch(), True
-        except Exception:
-            continue
-
-    # 4. Final fallback: return the best available source transcript
-    fallback = sorted(available_transcripts, key=sort_key)[0]
-    return fallback.fetch(), False
+        proxy_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        return attempt_fetch(proxy_api)
 
 @lru_cache(maxsize=100)
 def get_cached_processed_snippets(video_id, from_lang):
