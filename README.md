@@ -1,151 +1,197 @@
 # Vidioma
 
-Vidioma is a language-learning web app that turns YouTube subtitles into an interactive translation exercise. Paste in a YouTube URL, pick a source and target language, and the app pauses line by line so the user can type the translation before continuing.
+Vidioma is an interactive language practice app for YouTube videos. You paste a video URL, choose source and target languages, and practice translating subtitle lines while the video pauses line-by-line.
 
-## What it does
+## Features
 
-- Fetches a YouTube transcript from the backend
-- Translates subtitle lines on demand instead of translating the entire video up front
-- Pauses playback at each subtitle line for active recall practice
-- Checks user answers with fuzzy text matching rather than exact string matching
-- Supports multiple language pairs through Google Translate
+- Pulls transcript snippets for a YouTube video
+- Uses language-aware transcript selection (exact, regional, auto-translate fallback)
+- Lazily translates subtitle chunks during playback
+- Uses fuzzy answer checking in the frontend for active recall practice
+- Caches transcript and translation work to reduce repeated latency
 
-## Tech stack
+## Stack
 
 ### Frontend
-- React
+
+- React (`react-scripts`)
 - Axios
 - `react-youtube`
-- Custom CSS
 
 ### Backend
-- Flask
-- `flask-cors`
+
+- Flask + CORS
 - `youtube-transcript-api`
 - `deep-translator`
+- Redis (optional cache layer)
 - `python-dotenv`
 
-## Project structure
+## Repository Layout
 
 ```text
 Vidioma/
-├─ backend/
-│  ├─ app.py
-│  ├─ requirements.txt
-│  ├─ .env.example
-│  └─ manual_api_smoke_test.py
-├─ frontend/
-│  ├─ package.json
-│  ├─ .env.example
-│  ├─ public/
-│  └─ src/
-└─ README.md
+  backend/
+    app.py
+    manual_api_smoke_test.py
+    requirements.txt
+  frontend/
+    package.json
+    src/
+    public/
+  README.md
 ```
 
-## Local setup
+## Local Development
 
 ### 1. Backend
 
-From the `backend` folder:
+From `backend/`:
 
 ```powershell
 python -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env
 ```
 
-Add your Webshare proxy credentials to `backend/.env`:
+Create `backend/.env` manually (there is no `.env.example` currently):
 
 ```env
+# Optional Redis cache
+REDIS_URL=redis://localhost:6379/0
+REDIS_TTL_SECONDS=86400
+
+# Optional until direct transcript fetch is blocked;
+# required for proxy fallback behavior
 WEBSHARE_USERNAME=your_webshare_username
 WEBSHARE_PASSWORD=your_webshare_password
+
+# Optional Flask runtime settings
+PORT=5000
+FLASK_ENV=development
 ```
 
-Then start the API:
+Run the backend:
 
 ```powershell
 python app.py
 ```
 
-The backend runs at `http://localhost:5000` by default.
+Backend default URL: `http://localhost:5000`
 
 ### 2. Frontend
 
-From the `frontend` folder:
+From `frontend/`:
 
 ```powershell
 npm install
-copy .env.example .env
 ```
 
-Set the frontend API URL in `frontend/.env`:
+Create `frontend/.env` (optional but recommended):
 
 ```env
 REACT_APP_API_URL=http://localhost:5000
 ```
 
-Then start the frontend:
+Run the frontend:
 
 ```powershell
 npm start
 ```
 
-The frontend runs at `http://localhost:3000` by default.
+Frontend default URL: `http://localhost:3000`
 
-## Environment variables
-
-### Backend
-
-- `WEBSHARE_USERNAME` — Webshare proxy username
-- `WEBSHARE_PASSWORD` — Webshare proxy password
-
-### Frontend
-
-- `REACT_APP_API_URL` — base URL for the Flask API
-
-## API routes
+## API
 
 ### `POST /api/transcript`
 
-Fetches transcript lines for a YouTube video.
+Fetches and cleans transcript snippets for a YouTube video in `from_lang`.
 
-Example request body:
+Request:
 
 ```json
 {
-  "url": "https://www.youtube.com/watch?v=example",
-  "from_lang": "en"
+  "url": "https://www.youtube.com/watch?v=YICiHiU2GBU",
+  "from_lang": "es"
+}
+```
+
+Success response:
+
+```json
+{
+  "video_id": "YICiHiU2GBU",
+  "snippets": [
+    {
+      "source": "Hola a todos",
+      "start": 12.34,
+      "duration": 1.8
+    }
+  ],
+  "from_lang": "es"
 }
 ```
 
 ### `POST /api/translate`
 
-Translates one or more transcript lines.
+Translates snippet objects from `from_lang` to `to_lang`.
 
-Example request body:
+Request:
 
 ```json
 {
-  "text": ["Hello world", "How are you?"],
+  "snippets": [
+    {
+      "source": "Hello world",
+      "start": 1.2,
+      "duration": 1.5
+    }
+  ],
   "from_lang": "en",
   "to_lang": "es"
 }
 ```
 
-## Notes
+Success response:
 
-- The frontend uses `REACT_APP_API_URL` and falls back to `http://localhost:5000` if it is not set.
-- The backend expects valid Webshare credentials in the environment.
-- `manual_api_smoke_test.py` is currently a simple manual smoke script, not a full automated test suite.
+```json
+{
+  "translated_snippets": [
+    {
+      "source": "Hola mundo",
+      "start": 1.2,
+      "duration": 1.5
+    }
+  ],
+  "cache_hit": false
+}
+```
 
-## Future improvements
+## Caching Behavior
 
-- Replace the manual backend smoke script with real automated tests
-- Add cleaner error handling and user-facing error states
-- Add better metadata and screenshots for deployment/portfolio presentation
-- Support more transcript edge cases and unavailable subtitle scenarios
+- In-memory LRU cache is used for transcript fetch and processed transcript snippets.
+- Redis cache (if available) is used for `/api/translate` responses.
+- If Redis is unavailable, the backend continues without Redis caching.
+
+## Smoke Test Script
+
+`backend/manual_api_smoke_test.py` is a manual latency/smoke check for:
+
+- `POST /api/transcript`
+- `POST /api/translate`
+
+Run it after the backend is running:
+
+```powershell
+cd backend
+python manual_api_smoke_test.py
+```
+
+## Current Limitations
+
+- No automated test suite yet (only manual smoke testing)
+- Error responses are basic and can be improved
+- Input validation can be hardened further for malformed JSON payloads
 
 ## License
 
-No license has been added yet.
+No license file is currently included.
