@@ -2,7 +2,7 @@ import requests
 import time
 
 BASE_URL = "http://127.0.0.1:5000" 
-video_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw" 
+video_url = "https://www.youtube.com/watch?v=YICiHiU2GBU" 
 from_lang = "es"
 to_lang = "iw"
 
