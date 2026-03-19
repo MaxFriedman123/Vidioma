@@ -191,6 +191,42 @@
   justify-content: center;
 }
 
+/* Container to keep the dots perfectly centered and spaced */
+.loader-animation {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px; /* Space between the dots */
+  margin-top: 20px;
+}
+
+/* The base shape and animation for each dot */
+.pulsing-dot {
+  width: 12px;
+  height: 12px;
+  background-color: #a8e6cf; /* Using the green from your correct answers! */
+  border-radius: 50%;
+  /* This tells it to run the 'pulse' keyframes infinitely */
+  animation: pulse 1.4s infinite ease-in-out both;
+}
+
+/* The inline styles we added to your React code earlier 
+  (<div style={{animationDelay: '0.2s'}}>) are what make 
+  them ripple in sequence instead of flashing all at once! 
+*/
+
+/* The actual animation logic */
+@keyframes pulse {
+  0%, 80%, 100% { 
+    transform: scale(0.4); /* Shrink down */
+    opacity: 0.3;          /* Fade out slightly */
+  } 
+  40% { 
+    transform: scale(1);   /* Pop to full size */
+    opacity: 1;            /* Full color */
+  }
+}
+
 /* ---------------------------------------------------
    ERROR SHAKE ANIMATION
 --------------------------------------------------- */
