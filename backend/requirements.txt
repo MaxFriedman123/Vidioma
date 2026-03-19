@@ -2,6 +2,7 @@ Flask
 flask-cors
 deep-translator
 youtube-transcript-api
+redis
 requests[socks]
 gunicorn
 python-dotenv

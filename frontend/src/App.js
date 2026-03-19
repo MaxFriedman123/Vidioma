@@ -112,6 +112,7 @@ const getSimilarity = (str1, str2) => {
 };
 
 function App() {
+  const [loadingText, setLoadingText] = useState("Extracting audio...");
   const [isLoading, setIsLoading] = useState(false);
   const [url, setUrl] = useState('');
   const [translatedTranscript, setTranslatedTranscript] = useState({});
@@ -134,6 +135,45 @@ function App() {
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
 
+  useEffect(() => {
+  let interval;
+  if (isLoading) {
+    const phrases = [
+      "Extracting subtitles...",
+      "Analyzing timing...",
+      `Translating to ${languages.find(l => l.code === toLang)?.name || 'target language'}...`,
+      "Syncing video timelines...",
+      "Finalizing the magic...",
+      "Almost there..."
+    ];
+    let currentPhraseIndex = -1;
+    
+    interval = setInterval(() => {
+      currentPhraseIndex = (currentPhraseIndex + 1) % phrases.length;
+      setLoadingText(phrases[currentPhraseIndex]);
+    }, 2000); // Changes text every 2 seconds
+  }
+  return () => clearInterval(interval);
+}, [isLoading, toLang]);
+
+  useEffect(() => {
+    // 1. Ensure we have a player, we aren't loading, and we have a transcript
+    if (player && !isLoading && transcript.length > 0) {
+      try {
+        // 2. Defensively check that the YouTube API has attached the playVideo function
+        if (typeof player.playVideo === 'function') {
+          // 3. Check the player state. -1 is "unstarted", 5 is "video cued".
+          const state = player.getPlayerState();
+          if (state === -1 || state === 5 || state === 2) { 
+             player.playVideo();
+          }
+        }
+      } catch (err) {
+        console.warn("YouTube player wasn't ready for commands yet:", err);
+      }
+    }
+  }, [player, isLoading, transcript]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -144,10 +184,9 @@ function App() {
       return;
     }
 
-    setVideoId(extractedId); // Set video ID right away to load the player
+    setVideoId(extractedId);
     setIsLoading(true);
 
-    setTranscript([]); // Clear previous transcript
     setTranslatedTranscript({}); // Clear previous translations
     fetchingRef.current.clear();
     setCurrentLineIndex(0); // Reset to start
@@ -451,7 +490,7 @@ function App() {
                       playerVars: {
                         rel: 0, 
                         modestbranding: 1, 
-                        autoplay: 1, 
+                        autoplay: 0, 
                       }
                     }}
                     onReady={(event) => setPlayer(event.target)}
@@ -461,10 +500,15 @@ function App() {
 
               {/* Focus Mode Display */}
               {isLoading ? (
-                <div className="focus-card">
-                  <h2 className="current-text" style={{ color: '#aaa' }}>
-                    Loading transcript... 
-                    <div className="button-spinner" style={{ display: 'inline-block', marginLeft: '10px' }}></div>
+                <div className="focus-card skeleton-card">
+                  <div className="loader-animation">
+                    {/* You can style these dots in CSS to pulse */}
+                    <div className="pulsing-dot"></div>
+                    <div className="pulsing-dot" style={{animationDelay: '0.2s'}}></div>
+                    <div className="pulsing-dot" style={{animationDelay: '0.4s'}}></div>
+                  </div>
+                  <h2 className="current-text" style={{ color: '#888', marginTop: '20px' }}>
+                    {loadingText}
                   </h2>
                 </div>
               ) : transcript.length > 0 && (
