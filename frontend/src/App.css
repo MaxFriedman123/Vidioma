@@ -1134,6 +1134,21 @@
   text-align: center;
 }
 
+.auth-forgot {
+  text-align: center;
+  margin: 12px 0 -8px;
+  font-size: 0.82rem;
+}
+
+.auth-forgot span {
+  color: #7dd3e8;
+  cursor: pointer;
+}
+
+.auth-forgot span:hover {
+  text-decoration: underline;
+}
+
 .auth-switch {
   text-align: center;
   color: #888;

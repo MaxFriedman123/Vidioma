@@ -2,13 +2,20 @@ import React, { useState } from 'react';
 import { useAuth } from '../AuthContext';
 
 export default function AuthModal({ mode: initialMode, onClose }) {
-  const { signUp, logIn } = useAuth();
-  const [mode, setMode] = useState(initialMode); // 'login' | 'signup'
+  const { signUp, logIn, resetPassword, updatePassword } = useAuth();
+  const [mode, setMode] = useState(initialMode); // 'login' | 'signup' | 'forgot' | 'reset'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const switchMode = (newMode) => {
+    setMode(newMode);
+    setError('');
+    setInfo('');
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -20,9 +27,21 @@ export default function AuthModal({ mode: initialMode, onClose }) {
       if (mode === 'signup') {
         await signUp(email, password);
         setInfo('Check your email to confirm your account, then log in.');
-      } else {
+      } else if (mode === 'login') {
         await logIn(email, password);
-        onClose(); // Close modal on successful login
+        onClose();
+      } else if (mode === 'forgot') {
+        await resetPassword(email);
+        setInfo('Check your email for a password reset link.');
+      } else if (mode === 'reset') {
+        if (password !== confirmPassword) {
+          setError('Passwords do not match.');
+          setLoading(false);
+          return;
+        }
+        await updatePassword(password);
+        setInfo('Password updated successfully!');
+        setTimeout(() => onClose(), 1500);
       }
     } catch (err) {
       setError(err.message || 'An error occurred');
@@ -31,6 +50,20 @@ export default function AuthModal({ mode: initialMode, onClose }) {
     }
   };
 
+  const title = {
+    login: 'Log In',
+    signup: 'Sign Up',
+    forgot: 'Reset Password',
+    reset: 'Set New Password',
+  }[mode];
+
+  const submitLabel = {
+    login: 'Log In',
+    signup: 'Create Account',
+    forgot: 'Send Reset Link',
+    reset: 'Update Password',
+  }[mode];
+
   return (
     <div className="auth-overlay" onClick={onClose}>
       <div className="auth-modal" onClick={(e) => e.stopPropagation()}>
@@ -38,55 +71,88 @@ export default function AuthModal({ mode: initialMode, onClose }) {
           &times;
         </button>
 
-        <h2 className="auth-title">
-          {mode === 'login' ? 'Log In' : 'Sign Up'}
-        </h2>
+        <h2 className="auth-title">{title}</h2>
 
         <form onSubmit={handleSubmit} className="auth-form">
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="auth-input"
-            required
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="auth-input"
-            required
-            minLength={6}
-          />
+          {(mode === 'login' || mode === 'signup' || mode === 'forgot') && (
+            <input
+              type="email"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="auth-input"
+              required
+            />
+          )}
+
+          {(mode === 'login' || mode === 'signup') && (
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="auth-input"
+              required
+              minLength={6}
+            />
+          )}
+
+          {mode === 'reset' && (
+            <>
+              <input
+                type="password"
+                placeholder="New password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="auth-input"
+                required
+                minLength={6}
+              />
+              <input
+                type="password"
+                placeholder="Confirm new password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="auth-input"
+                required
+                minLength={6}
+              />
+            </>
+          )}
 
           {error && <p className="auth-error">{error}</p>}
           {info && <p className="auth-info">{info}</p>}
 
           <button type="submit" className="auth-submit" disabled={loading}>
-            {loading
-              ? '...'
-              : mode === 'login'
-              ? 'Log In'
-              : 'Create Account'}
+            {loading ? '...' : submitLabel}
           </button>
         </form>
 
+        {mode === 'login' && (
+          <p className="auth-forgot">
+            <span onClick={() => switchMode('forgot')}>
+              Forgot your password?
+            </span>
+          </p>
+        )}
+
         <p className="auth-switch">
-          {mode === 'login' ? (
+          {mode === 'login' && (
             <>
               Don't have an account?{' '}
-              <span onClick={() => { setMode('signup'); setError(''); setInfo(''); }}>
-                Sign Up
-              </span>
+              <span onClick={() => switchMode('signup')}>Sign Up</span>
             </>
-          ) : (
+          )}
+          {mode === 'signup' && (
             <>
               Already have an account?{' '}
-              <span onClick={() => { setMode('login'); setError(''); setInfo(''); }}>
-                Log In
-              </span>
+              <span onClick={() => switchMode('login')}>Log In</span>
+            </>
+          )}
+          {mode === 'forgot' && (
+            <>
+              Remember your password?{' '}
+              <span onClick={() => switchMode('login')}>Log In</span>
             </>
           )}
         </p>
