@@ -465,6 +465,14 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
+        <a 
+          href="https://docs.google.com/forms/d/e/1FAIpQLSdy2zTXJ3pJ9GxIzCJFyUhZggE-sN2nrHZ1go6KFFM1JHonEw/viewform?usp=sf_link" 
+          target="_blank" 
+          rel="noopener noreferrer" 
+          className="feedback-link"
+        >
+          Feedback
+        </a>
         
         {/* LANDING PAGE UI */}
         {!videoId && (
