@@ -117,7 +117,7 @@ const getSimilarity = (str1, str2) => {
 };
 
 function App() {
-  const { isAuthenticated, loading: authLoading } = useAuth();
+  const { isAuthenticated, loading: authLoading, passwordRecoveryPending, clearPasswordRecovery } = useAuth();
   const { saveProgress, loadProgress, flushProgress } = useProgress();
 
   // ── View state: 'home' | 'player' | 'dashboard' ──────────────────
@@ -151,6 +151,13 @@ function App() {
   const [isError, setIsError] = useState(false); // Tracks wrong answers
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
+
+  // Open reset-password modal when a recovery link is followed
+  useEffect(() => {
+    if (passwordRecoveryPending) {
+      setAuthModalMode('reset');
+    }
+  }, [passwordRecoveryPending]);
 
   // Flush pending progress saves on unmount
   useEffect(() => {
@@ -609,7 +616,13 @@ function App() {
     <div className="App">
       {/* Auth Modal */}
       {authModalMode && (
-        <AuthModal mode={authModalMode} onClose={() => setAuthModalMode(null)} />
+        <AuthModal
+          mode={authModalMode}
+          onClose={() => {
+            setAuthModalMode(null);
+            if (passwordRecoveryPending) clearPasswordRecovery();
+          }}
+        />
       )}
 
       <header className="App-header">

@@ -9,6 +9,7 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
 
   // ── Bootstrap session ──────────────────────────────────────────────
   useEffect(() => {
@@ -23,9 +24,14 @@ export function AuthProvider({ children }) {
       setLoading(false);
     });
 
-    // Listen for auth changes (login, logout, token refresh)
+    // Listen for auth changes (login, logout, token refresh, password recovery)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, s) => setSession(s)
+      (event, s) => {
+        setSession(s);
+        if (event === 'PASSWORD_RECOVERY') {
+          setPasswordRecoveryPending(true);
+        }
+      }
     );
 
     return () => subscription.unsubscribe();
@@ -101,6 +107,21 @@ export function AuthProvider({ children }) {
     return data;
   }, []);
 
+  const resetPassword = useCallback(async (email) => {
+    if (!supabase) throw new Error('Auth not configured');
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    if (error) throw error;
+  }, []);
+
+  const updatePassword = useCallback(async (newPassword) => {
+    if (!supabase) throw new Error('Auth not configured');
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+    setPasswordRecoveryPending(false);
+  }, []);
+
   const logOut = useCallback(async () => {
     if (!supabase) return;
     sessionStorage.removeItem('vidioma_progress_migrated');
@@ -124,6 +145,10 @@ export function AuthProvider({ children }) {
     signUp,
     logIn,
     logOut,
+    resetPassword,
+    updatePassword,
+    passwordRecoveryPending,
+    clearPasswordRecovery: () => setPasswordRecoveryPending(false),
     isAuthenticated: !!session,
   };
 
