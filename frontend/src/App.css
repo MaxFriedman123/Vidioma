@@ -312,6 +312,76 @@
   transition: opacity 0.2s ease;
 }
 
+.skeleton-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0) 15%,
+    rgba(255, 255, 255, 0.08) 30%,
+    rgba(255, 255, 255, 0) 45%
+  );
+  transform: translateX(-100%);
+  animation: shimmer 1.8s infinite;
+  pointer-events: none;
+}
+
+.translation-loading-block {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden; /* Added to clip any nested animations or stray elements */
+}
+
+.optimistic-fallback {
+  color: #8eb2be;
+  font-size: 1.5rem;
+  margin-bottom: 4px;
+}
+
+.translation-skeleton {
+  width: min(92%, 520px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.translation-skeleton-line {
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(
+    110deg,
+    rgba(255, 255, 255, 0.12) 8%,
+    rgba(255, 255, 255, 0.26) 18%,
+    rgba(255, 255, 255, 0.12) 33%
+  );
+  background-size: 200% 100%;
+  /* Only animate the background-position so the element doesn't move */
+  animation: background-shimmer 1.5s linear infinite;
+}
+
+.translation-skeleton-line-lg {
+  width: 100%;
+}
+
+.translation-skeleton-line-md {
+  width: 72%;
+}
+
+.translation-failed-text {
+  margin: 0;
+  font-size: 1rem;
+  color: #f9bf74;
+}
+
 /* ---------------------------------------------------
    BACK BUTTON STYLES
 --------------------------------------------------- */
@@ -432,4 +502,40 @@
   margin-top: 20px;
   font-size: 0.9rem;
   color: #555;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+    transform: translateX(-100%);
+  }
+  100% {
+    background-position: -200% 0;
+    transform: translateX(100%);
+  }
+}
+
+/* New keyframe that only moves the background gradient, not the element itself */
+@keyframes background-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .focus-card {
+    width: 92vw;
+    padding: 22px;
+  }
+
+  .translation-skeleton {
+    width: 100%;
+  }
+
+  .optimistic-fallback {
+    font-size: 1.3rem;
+  }
 }
