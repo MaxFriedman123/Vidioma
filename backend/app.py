@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
@@ -10,14 +10,110 @@ import re
 import json
 import hashlib
 import redis
+import requests as http_requests
+from datetime import datetime, timezone
 from deep_translator import GoogleTranslator
-from functools import lru_cache
+from functools import lru_cache, wraps
+import jwt
 
 app = Flask(__name__)
 CORS(app)
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 REDIS_TTL_SECONDS = int(os.environ.get("REDIS_TTL_SECONDS", "86400"))
+
+# ── Supabase Configuration ──────────────────────────────────────────────
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")   # service role key (bypasses RLS)
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")     # fallback for HS256
+
+# ── JWKS client for ES256 token verification ────────────────────────────
+_jwks_client = None
+if SUPABASE_URL:
+    try:
+        _jwks_client = jwt.PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json")
+        print("JWKS client initialised for ES256 verification.")
+    except Exception as e:
+        print(f"Warning: JWKS init failed ({e}). Falling back to HS256.")
+
+# ── Supabase REST helpers (bypasses broken supabase-py on Python 3.14) ──
+SUPABASE_REST_URL = f"{SUPABASE_URL}/rest/v1" if SUPABASE_URL else ""
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_SERVICE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+} if SUPABASE_SERVICE_KEY else {}
+
+supabase_ready = bool(SUPABASE_REST_URL and SUPABASE_HEADERS)
+if supabase_ready:
+    print("Supabase REST client configured.")
+else:
+    print("Warning: Supabase env vars missing. Progress features disabled.")
+
+
+# ── Auth Middleware ──────────────────────────────────────────────────────
+def _verify_token(token):
+    """Verify a Supabase JWT. Tries JWKS (ES256) first, falls back to HS256."""
+    # Try JWKS (ES256) first
+    if _jwks_client:
+        signing_key = _jwks_client.get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["ES256"],
+            audience="authenticated",
+        )
+    # Fallback to HS256
+    if SUPABASE_JWT_SECRET:
+        return jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+    raise jwt.InvalidTokenError("No verification method configured")
+
+
+def require_auth(f):
+    """Decorator that verifies the Supabase JWT from the Authorization header.
+    On success, sets g.user_id to the authenticated user's UUID.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or malformed Authorization header"}), 401
+
+        token = auth_header.split(" ", 1)[1]
+
+        try:
+            payload = _verify_token(token)
+            g.user_id = payload["sub"]  # Supabase stores user UUID in 'sub'
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token has expired"}), 401
+        except jwt.InvalidTokenError as e:
+            return jsonify({"error": f"Invalid token: {e}"}), 401
+
+        return f(*args, **kwargs)
+    return decorated
+
+
+def optional_auth(f):
+    """Like require_auth but doesn't block guests — just sets g.user_id or None."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        g.user_id = None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+            try:
+                payload = _verify_token(token)
+                g.user_id = payload["sub"]
+            except jwt.InvalidTokenError:
+                pass  # guest fallback
+        return f(*args, **kwargs)
+    return decorated
 
 try:
     redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -310,6 +406,155 @@ def translate_text():
     except Exception as e:
         print(f"Translate Error: {e}")
         return jsonify({"error": str(e)}), 500
+
+# ── Progress Endpoints ───────────────────────────────────────────────────
+
+def _sb_get(table, params=None):
+    """GET from Supabase REST API."""
+    resp = http_requests.get(f"{SUPABASE_REST_URL}/{table}", headers=SUPABASE_HEADERS, params=params or {})
+    if not resp.ok:
+        raise Exception(f"Supabase GET {table} failed ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+def _sb_post(table, data, extra_headers=None, params=None):
+    """POST to Supabase REST API."""
+    headers = {**SUPABASE_HEADERS, **(extra_headers or {})}
+    resp = http_requests.post(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {})
+    if not resp.ok:
+        raise Exception(f"Supabase POST {table} failed ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+def _sb_patch(table, data, params=None):
+    """PATCH (update) rows in Supabase REST API."""
+    headers = {**SUPABASE_HEADERS}
+    resp = http_requests.patch(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {})
+    if not resp.ok:
+        raise Exception(f"Supabase PATCH {table} failed ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
+def _ensure_video(youtube_id, title=None, thumbnail_url=None):
+    """Insert a video row if it doesn't already exist. Returns the video UUID.
+    Updates the title if it was previously missing.
+    """
+    if not supabase_ready:
+        return None
+
+    rows = _sb_get("videos", {"select": "id,title", "youtube_id": f"eq.{youtube_id}"})
+    if rows:
+        # Update title if we have one now but didn't before
+        if title and not rows[0].get("title"):
+            _sb_patch("videos", {"title": title}, {"youtube_id": f"eq.{youtube_id}"})
+        return rows[0]["id"]
+
+    row = {"youtube_id": youtube_id}
+    if title:
+        row["title"] = title
+    row["thumbnail_url"] = thumbnail_url or f"https://img.youtube.com/vi/{youtube_id}/hqdefault.jpg"
+
+    result = _sb_post("videos", row)
+    return result[0]["id"]
+
+
+@app.route("/api/progress", methods=["GET"])
+@require_auth
+def get_all_progress():
+    """Fetch all progress rows for the authenticated user, joined with video metadata."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        rows = _sb_get("user_progress", {
+            "select": "*, videos(youtube_id, title, thumbnail_url)",
+            "user_id": f"eq.{g.user_id}",
+            "order": "last_accessed_at.desc",
+        })
+        return jsonify({"progress": rows})
+    except Exception as e:
+        print(f"GET /api/progress error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/progress/upsert", methods=["POST"])
+@require_auth
+def upsert_progress():
+    """Create or update a user's progress on a specific video + language pair."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    data = request.get_json()
+    youtube_id = data.get("youtube_id")
+    transcript_language = data.get("transcript_language")
+    translation_language = data.get("translation_language")
+    current_line_index = data.get("current_line_index", 0)
+    total_lines = data.get("total_lines", 0)
+    title = data.get("title")
+
+    if not youtube_id or not transcript_language or not translation_language:
+        return jsonify({"error": "youtube_id, transcript_language, and translation_language are required"}), 400
+
+    try:
+        video_id = _ensure_video(youtube_id, title=title)
+        if not video_id:
+            return jsonify({"error": "Failed to resolve video"}), 500
+
+        row = {
+            "user_id": g.user_id,
+            "video_id": video_id,
+            "transcript_language": transcript_language,
+            "translation_language": translation_language,
+            "current_line_index": current_line_index,
+            "total_lines": total_lines,
+            "last_accessed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        result = _sb_post("user_progress", row,
+            extra_headers={"Prefer": "return=representation,resolution=merge-duplicates"},
+            params={"on_conflict": "user_id,video_id,transcript_language,translation_language"},
+        )
+
+        return jsonify({"progress": result[0] if result else None})
+    except Exception as e:
+        print(f"POST /api/progress/upsert error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/progress/<youtube_id>", methods=["GET"])
+@require_auth
+def get_video_progress(youtube_id):
+    """Fetch the user's progress for a specific YouTube video."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        videos = _sb_get("videos", {"select": "id", "youtube_id": f"eq.{youtube_id}"})
+        if not videos:
+            return jsonify({"progress": None})
+
+        video_uuid = videos[0]["id"]
+
+        params = {
+            "select": "*",
+            "user_id": f"eq.{g.user_id}",
+            "video_id": f"eq.{video_uuid}",
+            "order": "last_accessed_at.desc",
+            "limit": "1",
+        }
+
+        transcript_lang = request.args.get("transcript_language")
+        translation_lang = request.args.get("translation_language")
+        if transcript_lang:
+            params["transcript_language"] = f"eq.{transcript_lang}"
+        if translation_lang:
+            params["translation_language"] = f"eq.{translation_lang}"
+
+        rows = _sb_get("user_progress", params)
+        return jsonify({"progress": rows[0] if rows else None})
+    except Exception as e:
+        print(f"GET /api/progress/{youtube_id} error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

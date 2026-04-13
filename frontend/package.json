@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
     "axios": "^1.13.5",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -21,6 +22,11 @@
       "react-app/jest"
     ]
   },
+  "jest": {
+    "testMatch": [
+      "**/src/**/*.test.{js,jsx,ts,tsx}"
+    ]
+  },
   "browserslist": {
     "production": [
       ">0.2%",
@@ -32,5 +38,9 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2"
   }
 }
