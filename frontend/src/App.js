@@ -1,7 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import YouTube from 'react-youtube';
 import './App.css';
+import { useAuth } from './AuthContext';
+import { useProgress } from './useProgress';
+import Navbar from './components/Navbar';
+import AuthModal from './components/AuthModal';
+import Dashboard from './components/Dashboard';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
@@ -26,9 +31,9 @@ const CustomSelect = ({ value, onChange, options }) => {
   const selectedOption = options.find(opt => opt.code === value);
 
   return (
-    <div 
-      className="custom-select-container" 
-      tabIndex={0} 
+    <div
+      className="custom-select-container"
+      tabIndex={0}
       onBlur={() => setIsOpen(false)}
     >
       <div className="custom-select-trigger" onClick={() => setIsOpen(!isOpen)}>
@@ -40,8 +45,8 @@ const CustomSelect = ({ value, onChange, options }) => {
       {isOpen && (
         <div className="custom-select-dropdown">
           {options.map(opt => (
-            <div 
-              key={opt.code} 
+            <div
+              key={opt.code}
               className="custom-select-option"
               onMouseDown={() => {
                 onChange(opt.code);
@@ -112,6 +117,15 @@ const getSimilarity = (str1, str2) => {
 };
 
 function App() {
+  const { isAuthenticated, loading: authLoading } = useAuth();
+  const { saveProgress, loadProgress, flushProgress } = useProgress();
+
+  // ── View state: 'home' | 'player' | 'dashboard' ──────────────────
+  const [view, setView] = useState('home');
+  const [dashboardKey, setDashboardKey] = useState(0);
+  const [authModalMode, setAuthModalMode] = useState(null); // null | 'login' | 'signup'
+  const [guestBannerDismissed, setGuestBannerDismissed] = useState(false);
+
   const [loadingText, setLoadingText] = useState("Extracting audio...");
   const [isLoading, setIsLoading] = useState(false);
   const [url, setUrl] = useState('');
@@ -127,7 +141,7 @@ function App() {
   const [isFinished, setIsFinished] = useState(false); // Tracks if the video is done
   const [revealPos, setRevealPos] = useState({ x: -999, y: -999 });
   const revealRef = useRef(null);
-  
+
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
   const [userInput, setUserInput] = useState('');
@@ -136,6 +150,23 @@ function App() {
   const [isError, setIsError] = useState(false); // Tracks wrong answers
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
+
+  // ── Save progress on every correct answer ─────────────────────────
+  const saveCurrentProgress = useCallback(() => {
+    if (!videoId || transcript.length === 0) return;
+    saveProgress({
+      youtube_id: videoId,
+      transcript_language: fromLang,
+      translation_language: toLang,
+      current_line_index: currentLineIndex,
+      total_lines: transcript.length,
+    });
+  }, [videoId, fromLang, toLang, currentLineIndex, transcript.length, saveProgress]);
+
+  // Flush pending progress saves on unmount
+  useEffect(() => {
+    return () => flushProgress();
+  }, [flushProgress]);
 
   useEffect(() => {
   let interval;
@@ -149,7 +180,7 @@ function App() {
       "Almost there..."
     ];
     let currentPhraseIndex = -1;
-    
+
     interval = setInterval(() => {
       currentPhraseIndex = (currentPhraseIndex + 1) % phrases.length;
       setLoadingText(phrases[currentPhraseIndex]);
@@ -166,11 +197,17 @@ function App() {
           // 2. Defensively check that the YouTube API has attached the playVideo function
           // and that the iframe is actually loaded (addresses the "null src" issue)
           const iframe = typeof player.getIframe === 'function' ? player.getIframe() : null;
-          
+
           if (typeof player.playVideo === 'function' && iframe && iframe.src) {
+            // Seek to the saved line's start time if resuming mid-video
+            if (currentLineIndex > 0 && currentLineIndex < transcript.length) {
+              const seekTime = transcript[currentLineIndex].start;
+              player.seekTo(seekTime, true);
+            }
+
             // 3. Check the player state. -1 is "unstarted", 5 is "video cued".
             const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
-            if (state === -1 || state === 5 || state === 2) { 
+            if (state === -1 || state === 5 || state === 2) {
                player.playVideo();
             }
           }
@@ -178,9 +215,10 @@ function App() {
           console.warn("YouTube player wasn't fully ready for commands yet:", err);
         }
       }, 500); // 500ms buffer to ensure iframe stabilization
-      
+
       return () => clearTimeout(playTimer);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player, isPlayerReady, isLoading, transcript]);
 
   const handleSubmit = async (e) => {
@@ -195,11 +233,12 @@ function App() {
 
     setVideoId(extractedId);
     setIsLoading(true);
+    setView('player');
 
     setTranslatedTranscript({}); // Clear previous translations
     setTranslationStatus({});
     fetchingRef.current.clear();
-    setCurrentLineIndex(0); // Reset to start
+    setCurrentLineIndex(0); // Reset to start — may be overridden by loadProgress
     setShowInput(false);
     setAnswered(false);
     setIsError(false);
@@ -212,7 +251,13 @@ function App() {
         from_lang: fromLang,
         to_lang: toLang
        });
-      setTranscript(response.data.snippets); 
+      setTranscript(response.data.snippets);
+
+      // Try to resume from saved progress
+      const savedLine = await loadProgress(extractedId, fromLang, toLang);
+      if (savedLine > 0) {
+        setCurrentLineIndex(savedLine);
+      }
     } catch (error) {
       console.error("Error:", error);
       setIsError(true);
@@ -221,16 +266,56 @@ function App() {
     }
   };
 
+  // ── Launch directly from Dashboard card ───────────────────────────
+  const handleDashboardSelect = ({ youtubeId, transcriptLanguage, translationLanguage, startLine }) => {
+    setUrl(`https://www.youtube.com/watch?v=${youtubeId}`);
+    setFromLang(transcriptLanguage);
+    setToLang(translationLanguage);
+    setVideoId(youtubeId);
+    setIsLoading(true);
+    setView('player');
+
+    setTranslatedTranscript({});
+    setTranslationStatus({});
+    fetchingRef.current.clear();
+    setCurrentLineIndex(0);
+    setShowInput(false);
+    setAnswered(false);
+    setIsError(false);
+    setIsFinished(false);
+    setIsPlayerReady(false);
+
+    axios
+      .post(`${API_BASE_URL}/api/transcript`, {
+        url: `https://www.youtube.com/watch?v=${youtubeId}`,
+        from_lang: transcriptLanguage,
+        to_lang: translationLanguage,
+      })
+      .then((response) => {
+        const snippets = response.data.snippets;
+        setTranscript(snippets);
+        // Clamp startLine: if finished (>= total), restart from 0
+        const safeStart = (startLine && startLine < snippets.length) ? startLine : 0;
+        setCurrentLineIndex(safeStart);
+      })
+      .catch((error) => {
+        console.error('Error:', error);
+        setIsError(true);
+      })
+      .finally(() => setIsLoading(false));
+  };
+
   // ---------------------------------------------------------
-  // THE REVERSE GEAR (Go back to home)
+  // Reset all player/transcript state to defaults
   // ---------------------------------------------------------
-  const handleBack = () => {
-    // Pause the video if it's playing
+  const resetPlayerState = useCallback(() => {
+    flushProgress();
+
+    // Safely pause — player may have been destroyed if view changed
     if (player) {
-      player.pauseVideo();
+      try { player.pauseVideo(); } catch (_) {}
     }
-    
-    // Reset all state variables back to default
+
     setVideoId('');
     setUrl('');
     setTranscript([]);
@@ -246,6 +331,11 @@ function App() {
     setIsFinished(false);
     setPlayer(null);
     setIsPlayerReady(false);
+  }, [player, flushProgress]);
+
+  const handleBack = () => {
+    resetPlayerState();
+    setView('home');
   };
 
   // ---------------------------------------------------------
@@ -259,7 +349,7 @@ function App() {
 
     const LOOKAHEAD = 5; // How many lines to translate in advance
     const endIndex = Math.min(currentLineIndex + LOOKAHEAD, transcript.length);
-    
+
     for (let i = currentLineIndex; i < endIndex; i++) {
       if (!translatedTranscript[i] && !fetchingRef.current.has(i)) {
         indicesToTranslate.push(i);
@@ -288,7 +378,7 @@ function App() {
         to_lang: toLang
       }).then(response => {
         const newTranslations = response.data.translated_snippets;
-        
+
         // Save the new translations into our dictionary object
         setTranslatedTranscript(prev => {
           const updated = { ...prev };
@@ -296,7 +386,7 @@ function App() {
             updated[idx] = newTranslations[i].source;
           });
           return updated;
-        }); 
+        });
 
         setTranslationStatus(prev => {
           const updated = { ...prev };
@@ -329,29 +419,29 @@ function App() {
     if (player && transcript.length > 0) {
       interval = setInterval(async () => {
         const currentTime = await player.getCurrentTime();
-        
+
         // 1. Detect if the user scrubbed the timeline (jumped > 0.2 seconds)
         if (Math.abs(currentTime - lastTimeRef.current) > 0.2) {
-          
+
           // Find the correct transcript line for the new time.
           // We want the FIRST line whose "effective end time" is AFTER the current time.
           let actualIndex = transcript.findIndex((line, index) => {
             const nextLine = transcript[index + 1];
-            
+
             // Calculate when this line effectively ends
             let effectiveEndTime = line.start + line.duration;
-            
+
             // Account for overlaps: if this line bleeds into the next line, cap its end time
             if (nextLine && effectiveEndTime > nextLine.start) {
               effectiveEndTime = nextLine.start;
             }
-            
+
             return effectiveEndTime > currentTime;
           });
-          
+
           // If they rewind to the very beginning before the first subtitle, default to 0
           if (actualIndex === -1 && currentTime < transcript[0].start) {
-            actualIndex = 0; 
+            actualIndex = 0;
           }
 
           // If they jumped to a completely different line, resync the UI!
@@ -369,24 +459,24 @@ function App() {
             setAnswered(false);
           }
         }
-        
+
         // Update the tracker for the next loop
         lastTimeRef.current = currentTime;
 
         // 2. The Auto-Pause Logic (Only runs if we aren't waiting for input)
         if (!showInput) {
           const currentLine = transcript[currentLineIndex];
-          const endTime = 
-          currentLineIndex < transcript.length - 1 && currentLine.start + currentLine.duration > transcript[currentLineIndex + 1].start 
-          ? transcript[currentLineIndex + 1].start - .2 
+          const endTime =
+          currentLineIndex < transcript.length - 1 && currentLine.start + currentLine.duration > transcript[currentLineIndex + 1].start
+          ? transcript[currentLineIndex + 1].start - .2
           : Math.min(currentLine.start + currentLine.duration, player.getDuration());
-            
+
           if (currentTime >= endTime) {
-            player.pauseVideo();   
-            setShowInput(true);    
+            player.pauseVideo();
+            setShowInput(true);
           }
         }
-      }, 100); 
+      }, 100);
     }
     return () => clearInterval(interval);
   }, [player, transcript, currentLineIndex, showInput]);
@@ -405,9 +495,31 @@ function App() {
           setShowInput(false);    // Hide box
           setAnswered(false);    // Reset answered state
           player.playVideo();     // Resume Video
+
+          // Save progress after advancing
+          const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
+          saveProgress({
+            youtube_id: videoId,
+            transcript_language: fromLang,
+            translation_language: toLang,
+            current_line_index: nextIndex,
+            total_lines: transcript.length,
+            title: videoTitle,
+          });
         } else {
           setIsFinished(true); // Mark the video as finished
           player.pauseVideo(); // Just to be safe, ensure the video is paused at the end
+
+          // Save final progress
+          const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
+          saveProgress({
+            youtube_id: videoId,
+            transcript_language: fromLang,
+            translation_language: toLang,
+            current_line_index: transcript.length,
+            total_lines: transcript.length,
+            title: videoTitle,
+          });
         }
       } else {
         const expectedTranslation = translatedTranscript[currentLineIndex];
@@ -439,7 +551,7 @@ function App() {
       if (revealRef.current) {
         // Get the exact position of the text container on the screen
         const rect = revealRef.current.getBoundingClientRect();
-        
+
         // Calculate where the mouse is relative to the top-left of the text container
         setRevealPos({
           x: e.clientX - rect.left,
@@ -456,29 +568,64 @@ function App() {
   // ---------------------------------------------------------
   // RENDER
   // ---------------------------------------------------------
-  const currentLine = transcript[currentLineIndex];
-  const currentTranslation = translatedTranscript[currentLineIndex];
-  const currentStatus = translationStatus[currentLineIndex];
+  const safeLineIndex = (transcript.length > 0 && currentLineIndex >= transcript.length) ? 0 : currentLineIndex;
+  const currentLine = transcript[safeLineIndex];
+  const currentTranslation = translatedTranscript[safeLineIndex];
+  const currentStatus = translationStatus[safeLineIndex];
   const translationPending = transcript.length > 0 && (currentStatus === 'pending' || (currentTranslation === undefined && currentStatus !== 'failed'));
   const translationFailed = currentStatus === 'failed' && currentTranslation === undefined;
 
+  if (authLoading) return null; // Wait for auth to initialise
+
   return (
     <div className="App">
+      {/* Auth Modal */}
+      {authModalMode && (
+        <AuthModal mode={authModalMode} onClose={() => setAuthModalMode(null)} />
+      )}
+
       <header className="App-header">
-        <a 
-          href="https://docs.google.com/forms/d/e/1FAIpQLSdy2zTXJ3pJ9GxIzCJFyUhZggE-sN2nrHZ1go6KFFM1JHonEw/viewform?usp=sf_link" 
-          target="_blank" 
-          rel="noopener noreferrer" 
-          className="feedback-link"
-        >
-          Feedback
-        </a>
-        
+        {/* Navbar */}
+        <Navbar
+          onDashboard={() => { flushProgress(); setDashboardKey(k => k + 1); setView('dashboard'); }}
+          onHome={() => { resetPlayerState(); setView('home'); }}
+          onOpenAuth={(mode) => setAuthModalMode(mode)}
+        />
+
+        {view === 'home' && (
+          <a
+            href="https://docs.google.com/forms/d/e/1FAIpQLSdy2zTXJ3pJ9GxIzCJFyUhZggE-sN2nrHZ1go6KFFM1JHonEw/viewform?usp=sf_link"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="feedback-link"
+          >
+            Feedback
+          </a>
+        )}
+
+        {/* Guest banner */}
+        {!isAuthenticated && !guestBannerDismissed && view === 'player' && (
+          <div className="guest-banner">
+            <span>Sign up to save your progress across sessions.</span>
+            <button className="guest-banner-btn" onClick={() => setAuthModalMode('signup')}>
+              Sign Up
+            </button>
+            <button className="guest-banner-dismiss" onClick={() => setGuestBannerDismissed(true)}>
+              &times;
+            </button>
+          </div>
+        )}
+
+        {/* ── DASHBOARD VIEW ──────────────────────────────────── */}
+        {view === 'dashboard' && isAuthenticated && (
+          <Dashboard key={dashboardKey} onSelectVideo={handleDashboardSelect} />
+        )}
+
         {/* LANDING PAGE UI */}
-        {!videoId && (
+        {view === 'home' && (
           <div className="landing-container">
             <h1 className="landing-title">Vidioma</h1>
-            
+
             <form onSubmit={handleSubmit} className="modern-search-bar">
               {/* Link Icon */}
               <div className="input-icon">
@@ -488,9 +635,9 @@ function App() {
               </div>
 
               {/* URL Input */}
-              <input 
-                type="text" 
-                placeholder="Paste YouTube URL..." 
+              <input
+                type="text"
+                placeholder="Paste YouTube URL..."
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 required
@@ -501,18 +648,18 @@ function App() {
 
               {/* Language Selectors */}
               <div className="landing-lang-group">
-                <CustomSelect 
-                  value={fromLang} 
-                  onChange={setFromLang} 
-                  options={languages} 
+                <CustomSelect
+                  value={fromLang}
+                  onChange={setFromLang}
+                  options={languages}
                 />
 
-                <span className="lang-arrow">→</span>
+                <span className="lang-arrow">&rarr;</span>
 
-                <CustomSelect 
-                  value={toLang} 
-                  onChange={setToLang} 
-                  options={languages} 
+                <CustomSelect
+                  value={toLang}
+                  onChange={setToLang}
+                  options={languages}
                 />
               </div>
 
@@ -525,7 +672,7 @@ function App() {
         )}
 
         {/* TRANSCRIPT & VIDEO UI (Hides title and search bar when active) */}
-        {videoId && (
+        {view === 'player' && videoId && (
           <>
             {/* The New Back Button */}
             <button className="back-button" onClick={handleBack}>
@@ -538,22 +685,22 @@ function App() {
               {/* Video Player */}
               <div className="video-section">
                 <div className="video-wrapper">
-                  <YouTube 
-                    videoId={videoId} 
-                    opts={{ 
-                      height: '390', 
+                  <YouTube
+                    videoId={videoId}
+                    opts={{
+                      height: '390',
                       width: '640',
                       playerVars: {
-                        rel: 0, 
-                        modestbranding: 1, 
-                        autoplay: 0, 
+                        rel: 0,
+                        modestbranding: 1,
+                        autoplay: 0,
                       }
                     }}
                     onReady={(event) => {
                       setPlayer(event.target);
                       setIsPlayerReady(true);
                     }}
-                  />  
+                  />
                 </div>
               </div>
 
@@ -573,7 +720,7 @@ function App() {
               ) : transcript.length > 0 && (
                 isFinished ? (
                   <div className="focus-card victory-card">
-                    <h1 className="victory-title">🎉 You Did It!</h1>
+                    <h1 className="victory-title">You Did It!</h1>
                     <p className="victory-subtitle">
                       Awesome job! You successfully translated all <strong>{transcript.length}</strong> lines of this video.
                     </p>
@@ -587,7 +734,7 @@ function App() {
                     {currentLine.source}
                   </h2>
                   {/* The Flashlight Reveal Container */}
-                  <div 
+                  <div
                     className="reveal-container"
                     ref={revealRef}
                   >
@@ -602,9 +749,9 @@ function App() {
                     ) : (
                       <>
                         {/* Layer 1: The Base Text (Blurred unless answered) */}
-                        <h2 
-                          className="current-text" 
-                          style={{ 
+                        <h2
+                          className="current-text"
+                          style={{
                             color: answered ? '#a8e6cf' : '#aaa',
                             filter: answered ? 'none' : 'blur(8px)',
                             transition: 'color 0.3s ease',
@@ -617,12 +764,11 @@ function App() {
 
                         {/* Layer 2: The Clear Text (Masked globally by the mouse position) */}
                         {!answered && (
-                          <h2 
+                          <h2
                             className="current-text clear-flashlight-layer"
                             style={{
                               WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
                               maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`
-                              // We deleted the opacity line here! The mask handles hiding it entirely.
                             }}
                           >
                             {currentTranslation}
@@ -634,34 +780,34 @@ function App() {
 
                   {showInput ? (
                     <div className="input-container">
-                      <input 
+                      <input
                         ref={inputRef}
-                        type="text" 
+                        type="text"
                         // Add the error class if isError is true
                         className={`big-input ${isError ? 'input-error' : ''}`}
-                        placeholder="Type translation..." 
+                        placeholder="Type translation..."
                         value={userInput}
                         onChange={(e) => {
                           setUserInput(e.target.value);
                           if (isError) setIsError(false); // Instantly clear red state when they start typing
                         }}
                         onKeyDown={handleInputSubmit}
-                        readOnly={answered} 
+                        readOnly={answered}
                       />
                       <p className="hint">
-                        {answered 
-                          ? "Correct! Press Enter to resume." 
+                        {answered
+                          ? "Correct! Press Enter to resume."
                           : translationPending
                             ? "Preparing translation... press Enter again in a moment."
                             : translationFailed
                               ? "Translation is delayed. Try again in a moment."
-                          : isError 
+                          : isError
                             ? "Not quite! Give it another try." // Give a helpful hint when wrong
                             : "Press Enter to check."}
                       </p>
                     </div>
                   ) : (
-                    <p className="listening-indicator">👂 Listening...</p>
+                    <p className="listening-indicator">Listening...</p>
                   )}
 
                   <div className="progress">

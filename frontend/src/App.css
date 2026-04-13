@@ -387,7 +387,7 @@
 --------------------------------------------------- */
 .back-button {
   position: absolute;
-  top: 15px;
+  top: 60px;
   left: 10px;
   background-color: #7dd3e8; 
   color: #000;               
@@ -551,7 +551,7 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
   padding: 6px 14px;
   border-radius: 6px;
-  background-color: rgba(43, 45, 53, 0.8); /* Match header background with opacity */
+  background-color: rgba(43, 45, 53, 0.8);
   z-index: 1000;
   backdrop-filter: blur(4px);
 }
@@ -561,4 +561,353 @@
   border-color: #7dd3e8;
   background-color: rgba(125, 211, 232, 0.05);
   transform: translateY(-1px);
+}
+
+/* ---------------------------------------------------
+   NAVBAR STYLES
+--------------------------------------------------- */
+.navbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background-color: rgba(30, 31, 38, 0.95);
+  backdrop-filter: blur(8px);
+  z-index: 1100;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.navbar-brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: #7dd3e8;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+}
+
+.navbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.navbar-email {
+  color: #888;
+  font-size: 0.8rem;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navbar-btn {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ccc;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.navbar-btn:hover {
+  border-color: #7dd3e8;
+  color: #7dd3e8;
+}
+
+.navbar-btn-primary {
+  background-color: #7dd3e8;
+  color: #000;
+  border-color: #7dd3e8;
+}
+
+.navbar-btn-primary:hover {
+  background-color: #6bc2d7;
+}
+
+.navbar-btn-outline {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Push content below navbar */
+.App-header {
+  padding-top: 50px;
+}
+
+/* ---------------------------------------------------
+   AUTH MODAL STYLES
+--------------------------------------------------- */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.auth-modal {
+  background: #2b2d35;
+  border-radius: 12px;
+  padding: 36px 32px;
+  width: 380px;
+  max-width: 92vw;
+  position: relative;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+
+.auth-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 1.6rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.auth-close:hover {
+  color: #fff;
+}
+
+.auth-title {
+  margin: 0 0 24px;
+  font-size: 1.5rem;
+  color: #fff;
+  text-align: center;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.auth-input {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: #1e1e1e;
+  color: #fff;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.auth-input:focus {
+  border-color: #7dd3e8;
+}
+
+.auth-submit {
+  padding: 12px;
+  border-radius: 8px;
+  border: none;
+  background: #7dd3e8;
+  color: #000;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.auth-submit:hover {
+  background: #6bc2d7;
+}
+
+.auth-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-error {
+  color: #ff6b6b;
+  font-size: 0.85rem;
+  margin: 0;
+  text-align: center;
+}
+
+.auth-info {
+  color: #a8e6cf;
+  font-size: 0.85rem;
+  margin: 0;
+  text-align: center;
+}
+
+.auth-switch {
+  text-align: center;
+  color: #888;
+  font-size: 0.85rem;
+  margin-top: 16px;
+}
+
+.auth-switch span {
+  color: #7dd3e8;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.auth-switch span:hover {
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------
+   GUEST BANNER
+--------------------------------------------------- */
+.guest-banner {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(125, 211, 232, 0.12);
+  border: 1px solid rgba(125, 211, 232, 0.3);
+  backdrop-filter: blur(8px);
+  padding: 8px 18px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 1050;
+  font-size: 0.85rem;
+  color: #ccc;
+  white-space: nowrap;
+}
+
+.guest-banner-btn {
+  background: #7dd3e8;
+  color: #000;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 5px;
+  font-weight: 700;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.guest-banner-btn:hover {
+  background: #6bc2d7;
+}
+
+.guest-banner-dismiss {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.guest-banner-dismiss:hover {
+  color: #fff;
+}
+
+/* ---------------------------------------------------
+   DASHBOARD STYLES
+--------------------------------------------------- */
+.dashboard {
+  width: 100%;
+  max-width: 900px;
+  margin: 40px auto;
+  padding: 0 20px;
+}
+
+.dashboard-title {
+  font-size: 1.8rem;
+  color: #fff;
+  margin-bottom: 28px;
+}
+
+.dashboard-loading,
+.dashboard-error,
+.dashboard-empty {
+  color: #888;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.dashboard-error {
+  color: #ff6b6b;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.dashboard-card {
+  background: #333640;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.dashboard-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.dashboard-thumb {
+  width: 100%;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+  display: block;
+}
+
+.dashboard-card-body {
+  padding: 14px;
+}
+
+.dashboard-card-title {
+  font-size: 0.95rem;
+  color: #eee;
+  margin: 0 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-card-langs {
+  font-size: 0.8rem;
+  color: #7dd3e8;
+  margin: 0 0 10px;
+}
+
+.dashboard-progress-bar {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.dashboard-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #a8e6cf, #7dd3e8);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.dashboard-card-stat {
+  font-size: 0.75rem;
+  color: #888;
+  margin: 0;
+}
+
+.dashboard-card-time {
+  font-size: 0.7rem;
+  color: #666;
+  margin: 4px 0 0 0;
+  font-style: italic;
 }
