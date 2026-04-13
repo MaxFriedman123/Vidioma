@@ -151,18 +151,6 @@ function App() {
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
 
-  // ── Save progress on every correct answer ─────────────────────────
-  const saveCurrentProgress = useCallback(() => {
-    if (!videoId || transcript.length === 0) return;
-    saveProgress({
-      youtube_id: videoId,
-      transcript_language: fromLang,
-      translation_language: toLang,
-      current_line_index: currentLineIndex,
-      total_lines: transcript.length,
-    });
-  }, [videoId, fromLang, toLang, currentLineIndex, transcript.length, saveProgress]);
-
   // Flush pending progress saves on unmount
   useEffect(() => {
     return () => flushProgress();
