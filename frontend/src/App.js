@@ -141,6 +141,7 @@ function App() {
   const [isFinished, setIsFinished] = useState(false); // Tracks if the video is done
   const [revealPos, setRevealPos] = useState({ x: -999, y: -999 });
   const revealRef = useRef(null);
+  const [needsManualPlay, setNeedsManualPlay] = useState(false);
 
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
@@ -182,8 +183,6 @@ function App() {
     if (player && isPlayerReady && !isLoading && transcript.length > 0) {
       const playTimer = setTimeout(() => {
         try {
-          // 2. Defensively check that the YouTube API has attached the playVideo function
-          // and that the iframe is actually loaded (addresses the "null src" issue)
           const iframe = typeof player.getIframe === 'function' ? player.getIframe() : null;
 
           if (typeof player.playVideo === 'function' && iframe && iframe.src) {
@@ -193,16 +192,28 @@ function App() {
               player.seekTo(seekTime, true);
             }
 
-            // 3. Check the player state. -1 is "unstarted", 5 is "video cued".
             const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
             if (state === -1 || state === 5 || state === 2) {
-               player.playVideo();
+              player.playVideo();
+
+              // Check after a short delay if playback actually started (mobile may block it)
+              setTimeout(() => {
+                try {
+                  const newState = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+                  if (newState === -1 || newState === 5) {
+                    setNeedsManualPlay(true);
+                  }
+                } catch (_) {
+                  setNeedsManualPlay(true);
+                }
+              }, 800);
             }
           }
         } catch (err) {
           console.warn("YouTube player wasn't fully ready for commands yet:", err);
+          setNeedsManualPlay(true);
         }
-      }, 500); // 500ms buffer to ensure iframe stabilization
+      }, 500);
 
       return () => clearTimeout(playTimer);
     }
@@ -232,6 +243,7 @@ function App() {
     setIsError(false);
     setIsFinished(false);
     setIsPlayerReady(false); // Reset player readiness for the new video
+    setNeedsManualPlay(false);
 
     try {
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
@@ -272,6 +284,7 @@ function App() {
     setIsError(false);
     setIsFinished(false);
     setIsPlayerReady(false);
+    setNeedsManualPlay(false);
 
     axios
       .post(`${API_BASE_URL}/api/transcript`, {
@@ -319,11 +332,24 @@ function App() {
     setIsFinished(false);
     setPlayer(null);
     setIsPlayerReady(false);
+    setNeedsManualPlay(false);
   }, [player, flushProgress]);
 
   const handleBack = () => {
     resetPlayerState();
     setView('home');
+  };
+
+  const handleManualPlay = () => {
+    setNeedsManualPlay(false);
+    if (player) {
+      try {
+        if (currentLineIndex > 0 && currentLineIndex < transcript.length) {
+          player.seekTo(transcript[currentLineIndex].start, true);
+        }
+        player.playVideo();
+      } catch (_) {}
+    }
   };
 
   // ---------------------------------------------------------
@@ -472,57 +498,60 @@ function App() {
   // ---------------------------------------------------------
   // THE GAS PEDAL (Go to next line)
   // ---------------------------------------------------------
+  const processInputSubmit = useCallback(() => {
+    if (answered) {
+      // Move to next line if available
+      if (currentLineIndex < transcript.length - 1) {
+        const nextIndex = currentLineIndex + 1;
+        setCurrentLineIndex(nextIndex);
+        setUserInput('');       // Clear text
+        setShowInput(false);    // Hide box
+        setAnswered(false);    // Reset answered state
+        player.playVideo();     // Resume Video
+
+        // Save progress after advancing
+        const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
+        saveProgress({
+          youtube_id: videoId,
+          transcript_language: fromLang,
+          translation_language: toLang,
+          current_line_index: nextIndex,
+          total_lines: transcript.length,
+          title: videoTitle,
+        });
+      } else {
+        setIsFinished(true); // Mark the video as finished
+        player.pauseVideo(); // Just to be safe, ensure the video is paused at the end
+
+        // Save final progress
+        const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
+        saveProgress({
+          youtube_id: videoId,
+          transcript_language: fromLang,
+          translation_language: toLang,
+          current_line_index: transcript.length,
+          total_lines: transcript.length,
+          title: videoTitle,
+        });
+      }
+    } else {
+      const expectedTranslation = translatedTranscript[currentLineIndex];
+      if (!expectedTranslation) {
+        return;
+      }
+
+      if (getSimilarity(normalizeText(userInput), normalizeText(expectedTranslation)) >= 0.6) {
+        setAnswered(true); // Mark current line as answered
+        setIsError(false); // Clear any previous error state
+      } else {
+        setIsError(true); // Mark as error to show red border
+      }
+    }
+  }, [answered, currentLineIndex, transcript, player, userInput, translatedTranscript, videoId, fromLang, toLang, saveProgress]);
+
   const handleInputSubmit = (e) => {
     if (e.key === 'Enter') {
-      if (answered) {
-        // Move to next line if available
-        if (currentLineIndex < transcript.length - 1) {
-          const nextIndex = currentLineIndex + 1;
-          setCurrentLineIndex(nextIndex);
-          setUserInput('');       // Clear text
-          setShowInput(false);    // Hide box
-          setAnswered(false);    // Reset answered state
-          player.playVideo();     // Resume Video
-
-          // Save progress after advancing
-          const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
-          saveProgress({
-            youtube_id: videoId,
-            transcript_language: fromLang,
-            translation_language: toLang,
-            current_line_index: nextIndex,
-            total_lines: transcript.length,
-            title: videoTitle,
-          });
-        } else {
-          setIsFinished(true); // Mark the video as finished
-          player.pauseVideo(); // Just to be safe, ensure the video is paused at the end
-
-          // Save final progress
-          const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
-          saveProgress({
-            youtube_id: videoId,
-            transcript_language: fromLang,
-            translation_language: toLang,
-            current_line_index: transcript.length,
-            total_lines: transcript.length,
-            title: videoTitle,
-          });
-        }
-      } else {
-        const expectedTranslation = translatedTranscript[currentLineIndex];
-        if (!expectedTranslation) {
-          return;
-        }
-
-        if (getSimilarity(normalizeText(userInput), normalizeText(expectedTranslation)) >= 0.6) {
-          setAnswered(true); // Mark current line as answered
-          setIsError(false); // Clear any previous error state
-        } else {
-          setIsError(true); // Mark as error to show red border
-        }
-
-      }
+      processInputSubmit();
     }
   };
 
@@ -533,24 +562,35 @@ function App() {
     }
   }, [showInput]);
 
-  // GLOBAL MOUSE TRACKER
+  // GLOBAL MOUSE + TOUCH TRACKER
   useEffect(() => {
-    const handleGlobalMouseMove = (e) => {
+    const updateRevealPos = (clientX, clientY) => {
       if (revealRef.current) {
-        // Get the exact position of the text container on the screen
         const rect = revealRef.current.getBoundingClientRect();
-
-        // Calculate where the mouse is relative to the top-left of the text container
         setRevealPos({
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top,
+          x: clientX - rect.left,
+          y: clientY - rect.top,
         });
       }
     };
 
-    // Attach to the whole window instead of just the div
+    const handleGlobalMouseMove = (e) => {
+      updateRevealPos(e.clientX, e.clientY);
+    };
+
+    const handleTouchMove = (e) => {
+      const touch = e.touches[0];
+      if (touch) {
+        updateRevealPos(touch.clientX, touch.clientY);
+      }
+    };
+
     window.addEventListener('mousemove', handleGlobalMouseMove);
-    return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', handleGlobalMouseMove);
+      window.removeEventListener('touchmove', handleTouchMove);
+    };
   }, []);
 
   // ---------------------------------------------------------
@@ -615,40 +655,42 @@ function App() {
             <h1 className="landing-title">Vidioma</h1>
 
             <form onSubmit={handleSubmit} className="modern-search-bar">
-              {/* Link Icon */}
-              <div className="input-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="#888">
-                  <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
-                </svg>
-              </div>
+              <div className="search-bar-top">
+                {/* Link Icon */}
+                <div className="input-icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="#888">
+                    <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
+                  </svg>
+                </div>
 
-              {/* URL Input */}
-              <input
-                type="text"
-                placeholder="Paste YouTube URL..."
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                required
-              />
-
-              {/* Vertical Divider */}
-              <div className="divider"></div>
-
-              {/* Language Selectors */}
-              <div className="landing-lang-group">
-                <CustomSelect
-                  value={fromLang}
-                  onChange={setFromLang}
-                  options={languages}
+                {/* URL Input */}
+                <input
+                  type="text"
+                  placeholder="Paste YouTube URL..."
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  required
                 />
 
-                <span className="lang-arrow">&rarr;</span>
+                {/* Vertical Divider */}
+                <div className="divider"></div>
 
-                <CustomSelect
-                  value={toLang}
-                  onChange={setToLang}
-                  options={languages}
-                />
+                {/* Language Selectors */}
+                <div className="landing-lang-group">
+                  <CustomSelect
+                    value={fromLang}
+                    onChange={setFromLang}
+                    options={languages}
+                  />
+
+                  <span className="lang-arrow">&rarr;</span>
+
+                  <CustomSelect
+                    value={toLang}
+                    onChange={setToLang}
+                    options={languages}
+                  />
+                </div>
               </div>
 
               {/* Submit Button */}
@@ -682,13 +724,25 @@ function App() {
                         rel: 0,
                         modestbranding: 1,
                         autoplay: 0,
+                        playsinline: 1,
                       }
                     }}
                     onReady={(event) => {
                       setPlayer(event.target);
                       setIsPlayerReady(true);
                     }}
+                    onError={() => {
+                      setNeedsManualPlay(true);
+                    }}
                   />
+                  {needsManualPlay && !isLoading && transcript.length > 0 && (
+                    <button className="tap-to-play-overlay" onClick={handleManualPlay}>
+                      <svg viewBox="0 0 24 24" width="48" height="48" fill="#fff">
+                        <path d="M8 5v14l11-7z"/>
+                      </svg>
+                      <span>Tap to Start</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -768,30 +822,46 @@ function App() {
 
                   {showInput ? (
                     <div className="input-container">
-                      <input
-                        ref={inputRef}
-                        type="text"
-                        // Add the error class if isError is true
-                        className={`big-input ${isError ? 'input-error' : ''}`}
-                        placeholder="Type translation..."
-                        value={userInput}
-                        onChange={(e) => {
-                          setUserInput(e.target.value);
-                          if (isError) setIsError(false); // Instantly clear red state when they start typing
-                        }}
-                        onKeyDown={handleInputSubmit}
-                        readOnly={answered}
-                      />
+                      <div className="input-row">
+                        <input
+                          ref={inputRef}
+                          type="text"
+                          className={`big-input ${isError ? 'input-error' : ''}`}
+                          placeholder="Type translation..."
+                          value={userInput}
+                          onChange={(e) => {
+                            setUserInput(e.target.value);
+                            if (isError) setIsError(false);
+                          }}
+                          onKeyDown={handleInputSubmit}
+                          readOnly={answered}
+                        />
+                        <button
+                          className="mobile-submit-btn"
+                          onClick={processInputSubmit}
+                          aria-label={answered ? "Next" : "Check"}
+                        >
+                          {answered ? (
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                              <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/>
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                            </svg>
+                          )}
+                        </button>
+                      </div>
                       <p className="hint">
                         {answered
-                          ? "Correct! Press Enter to resume."
+                          ? "Correct! Press Enter or tap arrow to continue."
                           : translationPending
-                            ? "Preparing translation... press Enter again in a moment."
+                            ? "Preparing translation... try again in a moment."
                             : translationFailed
                               ? "Translation is delayed. Try again in a moment."
                           : isError
-                            ? "Not quite! Give it another try." // Give a helpful hint when wrong
-                            : "Press Enter to check."}
+                            ? "Not quite! Give it another try."
+                            : "Press Enter or tap check to submit."}
                       </p>
                     </div>
                   ) : (
