@@ -116,12 +116,14 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [url, setUrl] = useState('');
   const [translatedTranscript, setTranslatedTranscript] = useState({});
+  const [translationStatus, setTranslationStatus] = useState({});
   const fetchingRef = useRef(new Set()); // Tracks which lines are currently being fetched
   const inputRef = useRef(null);
   const lastTimeRef = useRef(0); // Tracks the time to detect scrubbing
   const [transcript, setTranscript] = useState([]);
   const [videoId, setVideoId] = useState('');
   const [player, setPlayer] = useState(null);
+  const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [isFinished, setIsFinished] = useState(false); // Tracks if the video is done
   const [revealPos, setRevealPos] = useState({ x: -999, y: -999 });
   const revealRef = useRef(null);
@@ -157,22 +159,29 @@ function App() {
 }, [isLoading, toLang]);
 
   useEffect(() => {
-    // 1. Ensure we have a player, we aren't loading, and we have a transcript
-    if (player && !isLoading && transcript.length > 0) {
-      try {
-        // 2. Defensively check that the YouTube API has attached the playVideo function
-        if (typeof player.playVideo === 'function') {
-          // 3. Check the player state. -1 is "unstarted", 5 is "video cued".
-          const state = player.getPlayerState();
-          if (state === -1 || state === 5 || state === 2) { 
-             player.playVideo();
+    // 1. Ensure we have a player, we aren't loading, it's ready, and we have a transcript
+    if (player && isPlayerReady && !isLoading && transcript.length > 0) {
+      const playTimer = setTimeout(() => {
+        try {
+          // 2. Defensively check that the YouTube API has attached the playVideo function
+          // and that the iframe is actually loaded (addresses the "null src" issue)
+          const iframe = typeof player.getIframe === 'function' ? player.getIframe() : null;
+          
+          if (typeof player.playVideo === 'function' && iframe && iframe.src) {
+            // 3. Check the player state. -1 is "unstarted", 5 is "video cued".
+            const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+            if (state === -1 || state === 5 || state === 2) { 
+               player.playVideo();
+            }
           }
+        } catch (err) {
+          console.warn("YouTube player wasn't fully ready for commands yet:", err);
         }
-      } catch (err) {
-        console.warn("YouTube player wasn't ready for commands yet:", err);
-      }
+      }, 500); // 500ms buffer to ensure iframe stabilization
+      
+      return () => clearTimeout(playTimer);
     }
-  }, [player, isLoading, transcript]);
+  }, [player, isPlayerReady, isLoading, transcript]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -188,12 +197,14 @@ function App() {
     setIsLoading(true);
 
     setTranslatedTranscript({}); // Clear previous translations
+    setTranslationStatus({});
     fetchingRef.current.clear();
     setCurrentLineIndex(0); // Reset to start
     setShowInput(false);
     setAnswered(false);
     setIsError(false);
     setIsFinished(false);
+    setIsPlayerReady(false); // Reset player readiness for the new video
 
     try {
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
@@ -224,6 +235,7 @@ function App() {
     setUrl('');
     setTranscript([]);
     setTranslatedTranscript({});
+    setTranslationStatus({});
     fetchingRef.current.clear();
     lastTimeRef.current = 0;
     setCurrentLineIndex(0);
@@ -233,6 +245,7 @@ function App() {
     setIsError(false);
     setIsFinished(false);
     setPlayer(null);
+    setIsPlayerReady(false);
   };
 
   // ---------------------------------------------------------
@@ -261,6 +274,14 @@ function App() {
 
     // If we found lines that need translating, send them to our new endpoint
     if (snippetsToTranslate.length > 0) {
+      setTranslationStatus(prev => {
+        const updated = { ...prev };
+        indicesToTranslate.forEach(idx => {
+          updated[idx] = 'pending';
+        });
+        return updated;
+      });
+
       axios.post(`${API_BASE_URL}/api/translate`, {
         snippets: snippetsToTranslate,
         from_lang: fromLang,
@@ -276,10 +297,26 @@ function App() {
           });
           return updated;
         }); 
+
+        setTranslationStatus(prev => {
+          const updated = { ...prev };
+          indicesToTranslate.forEach(idx => {
+            updated[idx] = 'ready';
+            fetchingRef.current.delete(idx);
+          });
+          return updated;
+        });
       }).catch(err => {
         console.error("Failed to fetch translation chunk:", err);
         // Remove from the fetching set so it can try again later
-        indicesToTranslate.forEach(idx => fetchingRef.current.delete(idx));
+        setTranslationStatus(prev => {
+          const updated = { ...prev };
+          indicesToTranslate.forEach(idx => {
+            updated[idx] = 'failed';
+            fetchingRef.current.delete(idx);
+          });
+          return updated;
+        });
       });
     }
   }, [currentLineIndex, transcript, toLang, fromLang, translatedTranscript]);
@@ -373,7 +410,12 @@ function App() {
           player.pauseVideo(); // Just to be safe, ensure the video is paused at the end
         }
       } else {
-        if (getSimilarity(normalizeText(userInput), normalizeText(translatedTranscript[currentLineIndex])) >= 0.6) {
+        const expectedTranslation = translatedTranscript[currentLineIndex];
+        if (!expectedTranslation) {
+          return;
+        }
+
+        if (getSimilarity(normalizeText(userInput), normalizeText(expectedTranslation)) >= 0.6) {
           setAnswered(true); // Mark current line as answered
           setIsError(false); // Clear any previous error state
         } else {
@@ -414,6 +456,12 @@ function App() {
   // ---------------------------------------------------------
   // RENDER
   // ---------------------------------------------------------
+  const currentLine = transcript[currentLineIndex];
+  const currentTranslation = translatedTranscript[currentLineIndex];
+  const currentStatus = translationStatus[currentLineIndex];
+  const translationPending = transcript.length > 0 && (currentStatus === 'pending' || (currentTranslation === undefined && currentStatus !== 'failed'));
+  const translationFailed = currentStatus === 'failed' && currentTranslation === undefined;
+
   return (
     <div className="App">
       <header className="App-header">
@@ -493,7 +541,10 @@ function App() {
                         autoplay: 0, 
                       }
                     }}
-                    onReady={(event) => setPlayer(event.target)}
+                    onReady={(event) => {
+                      setPlayer(event.target);
+                      setIsPlayerReady(true);
+                    }}
                   />  
                 </div>
               </div>
@@ -525,41 +576,51 @@ function App() {
                 ) : (
                 <div className="focus-card">
                   <h2 className="current-text">
-                    {transcript[currentLineIndex].source}
+                    {currentLine.source}
                   </h2>
                   {/* The Flashlight Reveal Container */}
                   <div 
                     className="reveal-container"
                     ref={revealRef}
                   >
-                    {/* Layer 1: The Base Text (Blurred unless answered) */}
-                    <h2 
-                      className="current-text" 
-                      style={{ 
-                        color: answered ? '#a8e6cf' : '#aaa',
-                        filter: answered ? 'none' : 'blur(8px)',
-                        transition: 'color 0.3s ease',
-                        userSelect: answered ? 'auto' : 'none',
-                        marginBottom: 0
-                      }}
-                    >
-                      {translatedTranscript[currentLineIndex] === undefined 
-                        ? "Translating..." 
-                        : translatedTranscript[currentLineIndex]}
-                    </h2>
+                    {translationPending ? (
+                      <div className="translation-loading-block">
+                        <div className="translation-skeleton" aria-hidden="true">
+                          <span className="translation-skeleton-line" />
+                        </div>
+                      </div>
+                    ) : translationFailed ? (
+                      <p className="translation-failed-text">Translation delayed. Keep going, we will retry shortly.</p>
+                    ) : (
+                      <>
+                        {/* Layer 1: The Base Text (Blurred unless answered) */}
+                        <h2 
+                          className="current-text" 
+                          style={{ 
+                            color: answered ? '#a8e6cf' : '#aaa',
+                            filter: answered ? 'none' : 'blur(8px)',
+                            transition: 'color 0.3s ease',
+                            userSelect: answered ? 'auto' : 'none',
+                            marginBottom: 0
+                          }}
+                        >
+                          {currentTranslation}
+                        </h2>
 
-                    {/* Layer 2: The Clear Text (Masked globally by the mouse position) */}
-                    {!answered && translatedTranscript[currentLineIndex] !== undefined && (
-                      <h2 
-                        className="current-text clear-flashlight-layer"
-                        style={{
-                          WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
-                          maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`
-                          // We deleted the opacity line here! The mask handles hiding it entirely.
-                        }}
-                      >
-                        {translatedTranscript[currentLineIndex]}
-                      </h2>
+                        {/* Layer 2: The Clear Text (Masked globally by the mouse position) */}
+                        {!answered && (
+                          <h2 
+                            className="current-text clear-flashlight-layer"
+                            style={{
+                              WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
+                              maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`
+                              // We deleted the opacity line here! The mask handles hiding it entirely.
+                            }}
+                          >
+                            {currentTranslation}
+                          </h2>
+                        )}
+                      </>
                     )}
                   </div>
 
@@ -582,6 +643,10 @@ function App() {
                       <p className="hint">
                         {answered 
                           ? "Correct! Press Enter to resume." 
+                          : translationPending
+                            ? "Preparing translation... press Enter again in a moment."
+                            : translationFailed
+                              ? "Translation is delayed. Try again in a moment."
                           : isError 
                             ? "Not quite! Give it another try." // Give a helpful hint when wrong
                             : "Press Enter to check."}
