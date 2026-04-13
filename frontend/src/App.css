@@ -1,5 +1,7 @@
 .App {
   text-align: center;
+  overflow-x: hidden;
+  max-width: 100vw;
 }
 
 .App-header {
@@ -12,6 +14,9 @@
   font-size: calc(10px + 2vmin);
   color: white;
   position: relative; /* Needed for absolute positioning the sparkle */
+  overflow-x: hidden;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .landing-container {
@@ -30,24 +35,34 @@
 
 .modern-search-bar {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   background-color: #ffffff;
-  border-radius: 8px; /* Rounded pill look */
-  height: 50px;
+  border-radius: 12px;
   width: 650px;
-  max-width: 90vw;
+  max-width: calc(100vw - 32px);
   box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+  overflow: hidden;
+}
+
+.search-bar-top {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 50px;
 }
 
 .input-icon {
-  padding: 0 15px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .modern-search-bar input {
   flex: 1;
+  min-width: 0;
   border: none;
   outline: none;
   font-size: 1rem;
@@ -64,14 +79,16 @@
   width: 1px;
   height: 24px;
   background-color: #e0e0e0;
-  margin: 0 15px;
+  margin: 0 10px;
+  flex-shrink: 0;
 }
 
 .landing-lang-group {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-right: 15px;
+  gap: 8px;
+  padding-right: 0;
+  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------
@@ -116,7 +133,7 @@
   width: 120px;
   z-index: 10;
   overflow: hidden;
-  max-height: 200px; 
+  max-height: 200px;
   overflow-y: auto;
 }
 
@@ -149,17 +166,15 @@
 }
 
 .go-button {
-  background-color: #7dd3e8; /* Light blue matching your image */
+  background-color: #7dd3e8;
   color: #000;
   font-weight: 800;
   font-size: 1rem;
   border: none;
-  height: 100%;
+  height: 50px;
   padding: 0 35px;
   cursor: pointer;
   transition: background-color 0.2s ease;
-  border-top-right-radius: 8px;
-  border-bottom-right-radius: 8px;
 }
 
 .go-button:hover {
@@ -210,18 +225,13 @@
   animation: pulse 1.4s infinite ease-in-out both;
 }
 
-/* The inline styles we added to your React code earlier 
-  (<div style={{animationDelay: '0.2s'}}>) are what make 
-  them ripple in sequence instead of flashing all at once! 
-*/
-
 /* The actual animation logic */
 @keyframes pulse {
-  0%, 80%, 100% { 
+  0%, 80%, 100% {
     transform: scale(0.4); /* Shrink down */
     opacity: 0.3;          /* Fade out slightly */
-  } 
-  40% { 
+  }
+  40% {
     transform: scale(1);   /* Pop to full size */
     opacity: 1;            /* Full color */
   }
@@ -389,9 +399,9 @@
   position: absolute;
   top: 60px;
   left: 10px;
-  background-color: #7dd3e8; 
-  color: #000;               
-  font-weight: 800;          
+  background-color: #7dd3e8;
+  color: #000;
+  font-weight: 800;
   font-size: 0.85rem;        /* Smaller font size */
   border: none;
   border-radius: 6px;        /* Slightly sharper corners for a smaller button */
@@ -402,12 +412,12 @@
   align-items: center;
   gap: 6px;                  /* Tighter gap between the arrow and text */
   transition: background-color 0.2s ease, transform 0.2s ease;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.2); 
+  box-shadow: 0 4px 10px rgba(0,0,0,0.2);
 }
 
 .back-button:hover {
-  background-color: #6bc2d7; 
-  transform: translateX(-3px); 
+  background-color: #6bc2d7;
+  transform: translateX(-3px);
 }
 
 .content-area {
@@ -447,6 +457,32 @@
   border-radius: 8px;
 }
 
+.tap-to-play-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: none;
+  cursor: pointer;
+  z-index: 5;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+
+.tap-to-play-overlay span {
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.tap-to-play-overlay:active {
+  background: rgba(0, 0, 0, 0.35);
+}
+
 /* The New Focus Card */
 .focus-card {
   background-color: #2d2d2d;
@@ -478,6 +514,34 @@
   background-color: #1e1e1e;
   color: white;
   outline: none;
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  justify-content: center;
+  gap: 8px;
+}
+
+.mobile-submit-btn {
+  display: none;
+  background-color: #7dd3e8;
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  width: 44px;
+  height: 44px;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s;
+}
+
+.mobile-submit-btn:hover,
+.mobile-submit-btn:active {
+  background-color: #6bc2d7;
 }
 
 .hint {
@@ -525,12 +589,232 @@
   }
 }
 
-@media (max-width: 900px) {
-  .focus-card {
-    width: 92vw;
-    padding: 22px;
+/* ---------------------------------------------------
+   NAVBAR HAMBURGER (hidden on desktop)
+--------------------------------------------------- */
+.navbar-hamburger {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.hamburger-line {
+  display: block;
+  width: 22px;
+  height: 2px;
+  background: #ccc;
+  border-radius: 2px;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+.hamburger-line.open:nth-child(1) {
+  transform: translateY(7px) rotate(45deg);
+}
+.hamburger-line.open:nth-child(2) {
+  opacity: 0;
+}
+.hamburger-line.open:nth-child(3) {
+  transform: translateY(-7px) rotate(-45deg);
+}
+
+.navbar-mobile-menu {
+  display: none;
+}
+
+/* ---------------------------------------------------
+   RESPONSIVE: TABLET & MOBILE (<=768px)
+--------------------------------------------------- */
+@media (max-width: 768px) {
+  /* Navbar: hide desktop actions, show hamburger */
+  .navbar-desktop {
+    display: none !important;
   }
 
+  .navbar-hamburger {
+    display: flex;
+  }
+
+  .navbar-mobile-menu {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 50px;
+    left: 0;
+    right: 0;
+    background: rgba(30, 31, 38, 0.98);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 12px 20px;
+    gap: 8px;
+    z-index: 1100;
+  }
+
+  .navbar-mobile-email {
+    color: #888;
+    font-size: 0.8rem;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 4px;
+  }
+
+  .navbar-mobile-item {
+    background: none;
+    border: none;
+    color: #ccc;
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 10px 0;
+    text-align: left;
+    cursor: pointer;
+    transition: color 0.2s;
+  }
+
+  .navbar-mobile-item:hover,
+  .navbar-mobile-item:active {
+    color: #7dd3e8;
+  }
+
+  /* Search bar: Row 1 = URL + divider + langs, Row 2 = GO */
+  .modern-search-bar {
+    width: calc(100vw - 32px);
+  }
+
+  .search-bar-top {
+    width: 100%;
+    height: 46px;
+  }
+
+  .input-icon {
+    padding: 0 8px;
+  }
+
+  .modern-search-bar input {
+    font-size: 0.9rem;
+  }
+
+  .divider {
+    margin: 0 6px;
+  }
+
+  .landing-lang-group {
+    gap: 5px;
+  }
+
+  .go-button {
+    width: 100%;
+    height: 44px;
+    font-size: 0.95rem;
+    border-top: 1px solid #e0e0e0;
+  }
+
+  /* Landing title */
+  .landing-title {
+    font-size: 2.2rem;
+    margin-bottom: 16px;
+  }
+
+  /* Content area: stack vertically */
+  .content-area {
+    flex-direction: column;
+    padding: 0 10px;
+    margin-top: 10px;
+    gap: 14px;
+  }
+
+  /* Video: full width */
+  .video-section {
+    flex: none;
+    width: 100%;
+    border-width: 3px;
+  }
+
+  /* Focus card: full width */
+  .focus-card {
+    width: 100%;
+    padding: 20px 14px;
+    min-height: auto;
+    box-sizing: border-box;
+  }
+
+  .current-text {
+    font-size: 1.2rem;
+    margin-bottom: 14px;
+  }
+
+  .big-input {
+    width: 95%;
+    font-size: 1rem;
+    padding: 12px;
+  }
+
+  /* Back button */
+  .back-button {
+    position: relative;
+    top: auto;
+    left: auto;
+    margin: 10px 10px 0;
+    align-self: flex-start;
+    font-size: 0.8rem;
+    height: 34px;
+    padding: 0 12px;
+  }
+
+  /* Victory card */
+  .victory-title {
+    font-size: 1.8rem;
+  }
+
+  .victory-subtitle {
+    font-size: 1rem;
+    margin-bottom: 20px;
+  }
+
+  .victory-button {
+    height: 44px;
+    font-size: 0.95rem;
+  }
+
+  /* Guest banner: allow wrapping */
+  .guest-banner {
+    white-space: normal;
+    text-align: center;
+    flex-wrap: wrap;
+    justify-content: center;
+    left: 10px;
+    right: 10px;
+    transform: none;
+    max-width: calc(100vw - 20px);
+    font-size: 0.8rem;
+    padding: 8px 12px;
+  }
+
+  /* Feedback link */
+  .feedback-link {
+    bottom: 12px;
+    right: 12px;
+    font-size: 0.75rem;
+    padding: 5px 10px;
+  }
+
+  /* Progress indicator */
+  .progress {
+    margin-top: 14px;
+    font-size: 0.8rem;
+  }
+
+  .hint {
+    font-size: 0.75rem;
+  }
+
+  .listening-indicator {
+    font-size: 0.9rem;
+  }
+
+  /* Translation skeleton */
   .translation-skeleton {
     width: 100%;
   }
@@ -538,7 +822,114 @@
   .optimistic-fallback {
     font-size: 1.3rem;
   }
+
+  /* Dashboard */
+  .dashboard {
+    padding: 0 14px;
+    margin: 24px auto;
+    box-sizing: border-box;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+
+  .dashboard-title {
+    font-size: 1.4rem;
+    margin-bottom: 18px;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .dashboard-card-body {
+    overflow: hidden;
+  }
+
+  .dashboard-card-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  /* Show mobile submit button */
+  .mobile-submit-btn {
+    display: flex;
+  }
+
+  .big-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Dropdown: ensure it doesn't overflow screen */
+  .custom-select-dropdown {
+    max-height: 180px;
+  }
+
+  /* Auth modal */
+  .auth-modal {
+    width: calc(100vw - 32px);
+    padding: 28px 20px;
+  }
 }
+
+/* ---------------------------------------------------
+   RESPONSIVE: SMALL PHONES (<=400px)
+--------------------------------------------------- */
+@media (max-width: 400px) {
+  .landing-title {
+    font-size: 1.8rem;
+  }
+
+  .modern-search-bar input {
+    font-size: 0.8rem;
+  }
+
+  .input-icon {
+    padding: 0 6px;
+  }
+
+  .divider {
+    margin: 0 4px;
+  }
+
+  .landing-lang-group {
+    gap: 3px;
+  }
+
+  .current-text {
+    font-size: 1rem;
+  }
+
+  .big-input {
+    font-size: 0.9rem;
+    padding: 10px;
+  }
+
+  .victory-title {
+    font-size: 1.5rem;
+  }
+
+  .victory-subtitle {
+    font-size: 0.9rem;
+  }
+
+  .focus-card {
+    padding: 16px 10px;
+  }
+
+  .lang-arrow {
+    font-size: 1rem;
+  }
+
+  .guest-banner {
+    font-size: 0.75rem;
+    gap: 8px;
+  }
+}
+
 .feedback-link {
   position: fixed;
   bottom: 20px;
@@ -819,6 +1210,7 @@
   max-width: 900px;
   margin: 40px auto;
   padding: 0 20px;
+  box-sizing: border-box;
 }
 
 .dashboard-title {
