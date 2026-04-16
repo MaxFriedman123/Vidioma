@@ -7,6 +7,9 @@ import { useProgress } from './useProgress';
 import Navbar from './components/Navbar';
 import AuthModal from './components/AuthModal';
 import Dashboard from './components/Dashboard';
+import NamePromptModal from './components/NamePromptModal';
+import ClassDashboard from './components/ClassDashboard';
+import ClassView from './components/ClassView';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
@@ -124,12 +127,14 @@ const getSimilarity = (str1, str2) => {
 };
 
 function App() {
-  const { isAuthenticated, loading: authLoading, passwordRecoveryPending, clearPasswordRecovery } = useAuth();
+  const { isAuthenticated, loading: authLoading, passwordRecoveryPending, clearPasswordRecovery, userProfile, profileLoading } = useAuth();
   const { saveProgress, loadProgress, flushProgress } = useProgress();
 
-  // ── View state: 'home' | 'player' | 'dashboard' ──────────────────
+  // ── View state: 'home' | 'player' | 'dashboard' | 'classes' | 'classDetail' ──
   const [view, setView] = useState('home');
   const [dashboardKey, setDashboardKey] = useState(0);
+  const [selectedClassId, setSelectedClassId] = useState(null);
+  const [classesKey, setClassesKey] = useState(0);
   const [authModalMode, setAuthModalMode] = useState(null); // null | 'login' | 'signup'
   const [guestBannerDismissed, setGuestBannerDismissed] = useState(false);
 
@@ -791,6 +796,7 @@ function App() {
           onDashboard={() => { resetPlayerState(); setDashboardKey(k => k + 1); setView('dashboard'); }}
           onHome={() => { resetPlayerState(); setView('home'); }}
           onOpenAuth={(mode) => setAuthModalMode(mode)}
+          onClasses={() => { resetPlayerState(); setClassesKey(k => k + 1); setView('classes'); }}
         />
 
         {view === 'home' && (
@@ -817,9 +823,30 @@ function App() {
           </div>
         )}
 
+        {/* ── NAME PROMPT (blocks interaction until profile is complete) ── */}
+        {isAuthenticated && !profileLoading && (!userProfile || !userProfile.user_name) && (
+          <NamePromptModal />
+        )}
+
         {/* ── DASHBOARD VIEW ──────────────────────────────────── */}
         {view === 'dashboard' && isAuthenticated && (
           <Dashboard key={dashboardKey} onSelectVideo={handleDashboardSelect} />
+        )}
+
+        {/* ── CLASSES VIEW ───────────────────────────────────── */}
+        {view === 'classes' && isAuthenticated && (
+          <ClassDashboard
+            key={classesKey}
+            onSelectClass={(classId) => { setSelectedClassId(classId); setView('classDetail'); }}
+          />
+        )}
+
+        {/* ── CLASS DETAIL VIEW ──────────────────────────────── */}
+        {view === 'classDetail' && isAuthenticated && selectedClassId && (
+          <ClassView
+            classId={selectedClassId}
+            onBack={() => { setClassesKey(k => k + 1); setView('classes'); }}
+          />
         )}
 
         {/* LANDING PAGE UI */}
