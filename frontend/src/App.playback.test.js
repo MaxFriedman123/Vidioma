@@ -1,7 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import axios from 'axios';
 
 const mockGetSession = jest.fn().mockResolvedValue({ data: { session: null } });
 const mockOnAuthStateChange = jest.fn().mockReturnValue({
@@ -20,7 +19,10 @@ jest.mock('./supabaseClient', () => ({
   },
 }));
 
-jest.mock('axios');
+jest.mock('axios', () => ({
+  get: jest.fn(),
+  post: jest.fn(),
+}));
 
 let mockLatestYouTubeProps = null;
 let mockLatestPlayer = null;
@@ -65,6 +67,8 @@ jest.mock('react-youtube', () => {
 
 import App from './App';
 import { AuthProvider } from './AuthContext';
+
+const axios = require('axios');
 
 const snippets = [
   { source: 'hello', start: 0, duration: 2 },
@@ -133,6 +137,7 @@ async function openHomeVideo() {
   await waitFor(() => {
     expect(axios.post).toHaveBeenCalledWith(
       expect.stringContaining('/api/transcript'),
+      expect.any(Object),
       expect.any(Object)
     );
   });
@@ -198,7 +203,8 @@ async function openDashboardVideo() {
         url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
         from_lang: 'en',
         to_lang: 'es',
-      })
+      }),
+      expect.any(Object)
     );
   });
 }
