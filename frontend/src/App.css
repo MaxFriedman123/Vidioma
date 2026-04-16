@@ -41,7 +41,7 @@
   width: 650px;
   max-width: calc(100vw - 32px);
   box-shadow: 0 10px 30px rgba(0,0,0,0.15);
-  overflow: hidden;
+  overflow: visible;
 }
 
 .search-bar-top {
@@ -87,7 +87,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-right: 0;
+  padding-right: 10px;
   flex-shrink: 0;
 }
 
@@ -131,7 +131,7 @@
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.1);
   width: 120px;
-  z-index: 10;
+  z-index: 1050;
   overflow: hidden;
   max-height: 200px;
   overflow-y: auto;
@@ -175,6 +175,7 @@
   padding: 0 35px;
   cursor: pointer;
   transition: background-color 0.2s ease;
+  border-radius: 0 12px 12px 0;
 }
 
 .go-button:hover {
