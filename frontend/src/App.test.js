@@ -6,7 +6,6 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import axios from 'axios';
 
 // ── Mock Supabase before any imports that use it ──────────────────────
 const mockGetSession = jest.fn().mockResolvedValue({ data: { session: null } });
@@ -29,12 +28,17 @@ jest.mock('./supabaseClient', () => ({
   },
 }));
 
-jest.mock('axios');
+jest.mock('axios', () => ({
+  get: jest.fn(),
+  post: jest.fn(),
+}));
 jest.mock('react-youtube', () => {
   return function MockYouTube() {
     return <div data-testid="youtube-player">YouTube Player</div>;
   };
 });
+
+const axios = require('axios');
 
 import App from './App';
 import { AuthProvider } from './AuthContext';

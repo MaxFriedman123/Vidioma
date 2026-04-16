@@ -70,6 +70,13 @@ const extractVideoId = (url) => {
   return (match && match[2].length === 11) ? match[2] : null;
 };
 
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+const isCanceledRequestError = (error) =>
+  (typeof axios.isCancel === 'function' && axios.isCancel(error)) ||
+  error?.code === 'ERR_CANCELED' ||
+  error?.name === 'CanceledError';
+
 // Helper function to strip line breaks, punctuation, and extra spaces
 const normalizeText = (text) => {
   if (!text) return '';
@@ -145,6 +152,9 @@ function App() {
   const playbackAttemptTimeoutsRef = useRef([]);
   const dashboardStartPromptActiveRef = useRef(false);
   const [playbackLaunchSource, setPlaybackLaunchSource] = useState('home');
+  const activePlayerSessionRef = useRef(0);
+  const transcriptRequestControllerRef = useRef(null);
+  const translationRequestControllersRef = useRef(new Set());
 
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
@@ -158,6 +168,16 @@ function App() {
   const clearPlaybackAttemptTimers = useCallback(() => {
     playbackAttemptTimeoutsRef.current.forEach((timerId) => clearTimeout(timerId));
     playbackAttemptTimeoutsRef.current = [];
+  }, []);
+
+  const cancelActivePlayerRequests = useCallback(() => {
+    if (transcriptRequestControllerRef.current) {
+      transcriptRequestControllerRef.current.abort();
+      transcriptRequestControllerRef.current = null;
+    }
+
+    translationRequestControllersRef.current.forEach((controller) => controller.abort());
+    translationRequestControllersRef.current.clear();
   }, []);
 
   const isPlaybackStarted = (state) => state === 1 || state === 3;
@@ -241,8 +261,13 @@ function App() {
 
   // Flush pending progress saves on unmount
   useEffect(() => {
-    return () => flushProgress();
-  }, [flushProgress]);
+    return () => {
+      activePlayerSessionRef.current += 1;
+      cancelActivePlayerRequests();
+      clearPlaybackAttemptTimers();
+      flushProgress();
+    };
+  }, [flushProgress, cancelActivePlayerRequests, clearPlaybackAttemptTimers]);
 
   useEffect(() => {
   let interval;
@@ -288,6 +313,42 @@ function App() {
     return undefined;
   }, [player, isPlayerReady, isLoading, transcript, attemptPlayback, clearPlaybackAttemptTimers, playbackLaunchSource]);
 
+  const beginPlayerSession = useCallback(({ nextUrl, nextVideoId, launchSource }) => {
+    activePlayerSessionRef.current += 1;
+    const sessionId = activePlayerSessionRef.current;
+
+    cancelActivePlayerRequests();
+    clearPlaybackAttemptTimers();
+
+    if (player) {
+      try { player.pauseVideo(); } catch (_) {}
+    }
+
+    setUrl(nextUrl);
+    setVideoId(nextVideoId);
+    setIsLoading(true);
+    setView('player');
+    setPlaybackLaunchSource(launchSource);
+    dashboardStartPromptActiveRef.current = launchSource === 'dashboard';
+
+    setTranscript([]);
+    setTranslatedTranscript({});
+    setTranslationStatus({});
+    fetchingRef.current.clear();
+    lastTimeRef.current = 0;
+    setCurrentLineIndex(0);
+    setShowInput(false);
+    setUserInput('');
+    setAnswered(false);
+    setIsError(false);
+    setIsFinished(false);
+    setPlayer(null);
+    setIsPlayerReady(false);
+    setNeedsManualPlay(false);
+
+    return sessionId;
+  }, [cancelActivePlayerRequests, clearPlaybackAttemptTimers, player]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
 
@@ -298,84 +359,104 @@ function App() {
       return;
     }
 
-    setVideoId(extractedId);
-    setIsLoading(true);
-    setView('player');
-    setPlaybackLaunchSource('home');
-    dashboardStartPromptActiveRef.current = false;
-
-    setTranslatedTranscript({}); // Clear previous translations
-    setTranslationStatus({});
-    fetchingRef.current.clear();
+    const requestUrl = url;
+    const sessionId = beginPlayerSession({
+      nextUrl: requestUrl,
+      nextVideoId: extractedId,
+      launchSource: 'home',
+    });
+    const controller = new AbortController();
+    transcriptRequestControllerRef.current = controller;
     setCurrentLineIndex(0); // Reset to start — may be overridden by loadProgress
-    setShowInput(false);
-    setAnswered(false);
-    setIsError(false);
-    setIsFinished(false);
-    setIsPlayerReady(false); // Reset player readiness for the new video
-    setNeedsManualPlay(false);
-
     try {
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
-        url,
+        url: requestUrl,
         from_lang: fromLang,
         to_lang: toLang
-       });
+       }, {
+        signal: controller.signal,
+      });
+      if (activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+
       setTranscript(response.data.snippets);
 
       // Try to resume from saved progress
       const savedLine = await loadProgress(extractedId, fromLang, toLang);
+      if (activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+
       if (savedLine > 0) {
         setCurrentLineIndex(savedLine);
       }
     } catch (error) {
+      if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+
       console.error("Error:", error);
       setIsError(true);
     } finally {
-      setIsLoading(false);
+      if (transcriptRequestControllerRef.current === controller) {
+        transcriptRequestControllerRef.current = null;
+      }
+
+      if (activePlayerSessionRef.current === sessionId) {
+        setIsLoading(false);
+      }
     }
   };
 
   // ── Launch directly from Dashboard card ───────────────────────────
-  const handleDashboardSelect = ({ youtubeId, transcriptLanguage, translationLanguage, startLine }) => {
-    setUrl(`https://www.youtube.com/watch?v=${youtubeId}`);
+  const handleDashboardSelect = async ({ youtubeId, transcriptLanguage, translationLanguage, startLine }) => {
+    const requestUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
+
     setFromLang(transcriptLanguage);
     setToLang(translationLanguage);
-    setVideoId(youtubeId);
-    setIsLoading(true);
-    setView('player');
-    setPlaybackLaunchSource('dashboard');
-    dashboardStartPromptActiveRef.current = true;
+    const sessionId = beginPlayerSession({
+      nextUrl: requestUrl,
+      nextVideoId: youtubeId,
+      launchSource: 'dashboard',
+    });
+    const controller = new AbortController();
+    transcriptRequestControllerRef.current = controller;
 
-    setTranslatedTranscript({});
-    setTranslationStatus({});
-    fetchingRef.current.clear();
-    setCurrentLineIndex(0);
-    setShowInput(false);
-    setAnswered(false);
-    setIsError(false);
-    setIsFinished(false);
-    setIsPlayerReady(false);
-    setNeedsManualPlay(false);
-
-    axios
-      .post(`${API_BASE_URL}/api/transcript`, {
-        url: `https://www.youtube.com/watch?v=${youtubeId}`,
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
+        url: requestUrl,
         from_lang: transcriptLanguage,
         to_lang: translationLanguage,
-      })
-      .then((response) => {
-        const snippets = response.data.snippets;
-        setTranscript(snippets);
-        // Clamp startLine: if finished (>= total), restart from 0
-        const safeStart = (startLine && startLine < snippets.length) ? startLine : 0;
-        setCurrentLineIndex(safeStart);
-      })
-      .catch((error) => {
-        console.error('Error:', error);
-        setIsError(true);
-      })
-      .finally(() => setIsLoading(false));
+      }, {
+        signal: controller.signal,
+      });
+
+      if (activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+
+      const snippets = response.data.snippets;
+      setTranscript(snippets);
+      // Clamp startLine: if finished (>= total), restart from 0
+      const safeStart = (startLine && startLine < snippets.length) ? startLine : 0;
+      setCurrentLineIndex(safeStart);
+    } catch (error) {
+      if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+
+      console.error('Error:', error);
+      setIsError(true);
+    } finally {
+      if (transcriptRequestControllerRef.current === controller) {
+        transcriptRequestControllerRef.current = null;
+      }
+
+      if (activePlayerSessionRef.current === sessionId) {
+        setIsLoading(false);
+      }
+    }
   };
 
   // ---------------------------------------------------------
@@ -383,6 +464,8 @@ function App() {
   // ---------------------------------------------------------
   const resetPlayerState = useCallback(() => {
     flushProgress();
+    activePlayerSessionRef.current += 1;
+    cancelActivePlayerRequests();
     clearPlaybackAttemptTimers();
 
     // Safely pause — player may have been destroyed if view changed
@@ -408,7 +491,7 @@ function App() {
     setNeedsManualPlay(false);
     setPlaybackLaunchSource('home');
     dashboardStartPromptActiveRef.current = false;
-  }, [player, flushProgress, clearPlaybackAttemptTimers]);
+  }, [player, flushProgress, clearPlaybackAttemptTimers, cancelActivePlayerRequests]);
 
   const handleBack = () => {
     resetPlayerState();
@@ -432,7 +515,7 @@ function App() {
     const endIndex = Math.min(currentLineIndex + LOOKAHEAD, transcript.length);
 
     for (let i = currentLineIndex; i < endIndex; i++) {
-      if (!translatedTranscript[i] && !fetchingRef.current.has(i)) {
+      if (!hasOwn(translatedTranscript, i) && !fetchingRef.current.has(i)) {
         indicesToTranslate.push(i);
         snippetsToTranslate.push({
           'source': transcript[i].source,
@@ -445,6 +528,9 @@ function App() {
 
     // If we found lines that need translating, send them to our new endpoint
     if (snippetsToTranslate.length > 0) {
+      const sessionId = activePlayerSessionRef.current;
+      const controller = new AbortController();
+
       setTranslationStatus(prev => {
         const updated = { ...prev };
         indicesToTranslate.forEach(idx => {
@@ -453,11 +539,19 @@ function App() {
         return updated;
       });
 
+      translationRequestControllersRef.current.add(controller);
+
       axios.post(`${API_BASE_URL}/api/translate`, {
         snippets: snippetsToTranslate,
         from_lang: fromLang,
         to_lang: toLang
+      }, {
+        signal: controller.signal,
       }).then(response => {
+        if (activePlayerSessionRef.current !== sessionId) {
+          return;
+        }
+
         const newTranslations = response.data.translated_snippets;
 
         // Save the new translations into our dictionary object
@@ -478,6 +572,10 @@ function App() {
           return updated;
         });
       }).catch(err => {
+        if (isCanceledRequestError(err) || activePlayerSessionRef.current !== sessionId) {
+          return;
+        }
+
         console.error("Failed to fetch translation chunk:", err);
         // Remove from the fetching set so it can try again later
         setTranslationStatus(prev => {
@@ -488,6 +586,8 @@ function App() {
           });
           return updated;
         });
+      }).finally(() => {
+        translationRequestControllersRef.current.delete(controller);
       });
     }
   }, [currentLineIndex, transcript, toLang, fromLang, translatedTranscript]);
@@ -667,7 +767,7 @@ function App() {
   const currentLine = transcript[safeLineIndex];
   const currentTranslation = translatedTranscript[safeLineIndex];
   const currentStatus = translationStatus[safeLineIndex];
-  const translationPending = transcript.length > 0 && (currentStatus === 'pending' || (currentTranslation === undefined && currentStatus !== 'failed'));
+  const translationPending = transcript.length > 0 && (currentStatus === 'pending' || (!hasOwn(translatedTranscript, safeLineIndex) && currentStatus !== 'failed'));
   const translationFailed = currentStatus === 'failed' && currentTranslation === undefined;
 
   if (authLoading) return null; // Wait for auth to initialise
@@ -688,7 +788,7 @@ function App() {
       <header className="App-header">
         {/* Navbar */}
         <Navbar
-          onDashboard={() => { flushProgress(); setDashboardKey(k => k + 1); setView('dashboard'); }}
+          onDashboard={() => { resetPlayerState(); setDashboardKey(k => k + 1); setView('dashboard'); }}
           onHome={() => { resetPlayerState(); setView('home'); }}
           onOpenAuth={(mode) => setAuthModalMode(mode)}
         />
