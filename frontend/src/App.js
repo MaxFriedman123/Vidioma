@@ -142,6 +142,9 @@ function App() {
   const [revealPos, setRevealPos] = useState({ x: -999, y: -999 });
   const revealRef = useRef(null);
   const [needsManualPlay, setNeedsManualPlay] = useState(false);
+  const playbackAttemptTimeoutsRef = useRef([]);
+  const dashboardStartPromptActiveRef = useRef(false);
+  const [playbackLaunchSource, setPlaybackLaunchSource] = useState('home');
 
   // TRACKING STATE
   const [currentLineIndex, setCurrentLineIndex] = useState(0);
@@ -151,6 +154,83 @@ function App() {
   const [isError, setIsError] = useState(false); // Tracks wrong answers
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
+
+  const clearPlaybackAttemptTimers = useCallback(() => {
+    playbackAttemptTimeoutsRef.current.forEach((timerId) => clearTimeout(timerId));
+    playbackAttemptTimeoutsRef.current = [];
+  }, []);
+
+  const isPlaybackStarted = (state) => state === 1 || state === 3;
+  const shouldPromptDashboardManualStart =
+    playbackLaunchSource === 'dashboard' && dashboardStartPromptActiveRef.current;
+
+  const attemptPlayback = useCallback(({ seekToCurrentLine = false, allowMutedFallback = false, unmuteAfterStart = false } = {}) => {
+    if (!player || !isPlayerReady || typeof player.playVideo !== 'function') {
+      setNeedsManualPlay(shouldPromptDashboardManualStart);
+      return;
+    }
+
+    clearPlaybackAttemptTimers();
+
+    if (seekToCurrentLine && currentLineIndex > 0 && currentLineIndex < transcript.length && typeof player.seekTo === 'function') {
+      try {
+        player.seekTo(transcript[currentLineIndex].start, true);
+      } catch (_) {}
+    }
+
+    let mutedFallbackUsed = false;
+
+    const finalizeIfStarted = () => {
+      try {
+        const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+        if (isPlaybackStarted(state)) {
+          setNeedsManualPlay(false);
+          if (unmuteAfterStart && typeof player.unMute === 'function') {
+            try { player.unMute(); } catch (_) {}
+          }
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    };
+
+    const scheduleCheck = (attemptNumber) => {
+      const delay = attemptNumber === 0 ? 350 : 900;
+      const timerId = setTimeout(() => {
+        if (finalizeIfStarted()) return;
+
+        let currentState = -1;
+        try {
+          currentState = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+        } catch (_) {}
+
+        if (allowMutedFallback && !mutedFallbackUsed && (currentState === -1 || currentState === 2 || currentState === 5)) {
+          mutedFallbackUsed = true;
+          try { if (typeof player.mute === 'function') player.mute(); } catch (_) {}
+          try { player.playVideo(); } catch (_) {}
+          scheduleCheck(attemptNumber + 1);
+          return;
+        }
+
+        if (attemptNumber < 2) {
+          try { player.playVideo(); } catch (_) {}
+          scheduleCheck(attemptNumber + 1);
+          return;
+        }
+
+        setNeedsManualPlay(shouldPromptDashboardManualStart);
+      }, delay);
+
+      playbackAttemptTimeoutsRef.current.push(timerId);
+    };
+
+    try {
+      player.playVideo();
+      scheduleCheck(0);
+    } catch (_) {
+      setNeedsManualPlay(shouldPromptDashboardManualStart);
+    }
+  }, [player, isPlayerReady, currentLineIndex, transcript, clearPlaybackAttemptTimers, shouldPromptDashboardManualStart]);
 
   // Open reset-password modal when a recovery link is followed
   useEffect(() => {
@@ -186,46 +266,27 @@ function App() {
 }, [isLoading, toLang]);
 
   useEffect(() => {
-    // 1. Ensure we have a player, we aren't loading, it's ready, and we have a transcript
+    // Ensure we have a player, we aren't loading, it's ready, and we have a transcript.
     if (player && isPlayerReady && !isLoading && transcript.length > 0) {
+      clearPlaybackAttemptTimers();
+
+      if (playbackLaunchSource === 'dashboard' && dashboardStartPromptActiveRef.current) {
+        setNeedsManualPlay(true);
+        return undefined;
+      }
+
       const playTimer = setTimeout(() => {
-        try {
-          const iframe = typeof player.getIframe === 'function' ? player.getIframe() : null;
-
-          if (typeof player.playVideo === 'function' && iframe && iframe.src) {
-            // Seek to the saved line's start time if resuming mid-video
-            if (currentLineIndex > 0 && currentLineIndex < transcript.length) {
-              const seekTime = transcript[currentLineIndex].start;
-              player.seekTo(seekTime, true);
-            }
-
-            const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
-            if (state === -1 || state === 5 || state === 2) {
-              player.playVideo();
-
-              // Check after a short delay if playback actually started (mobile may block it)
-              setTimeout(() => {
-                try {
-                  const newState = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
-                  if (newState === -1 || newState === 5) {
-                    setNeedsManualPlay(true);
-                  }
-                } catch (_) {
-                  setNeedsManualPlay(true);
-                }
-              }, 800);
-            }
-          }
-        } catch (err) {
-          console.warn("YouTube player wasn't fully ready for commands yet:", err);
-          setNeedsManualPlay(true);
-        }
+        attemptPlayback({ seekToCurrentLine: true, allowMutedFallback: true });
       }, 500);
 
-      return () => clearTimeout(playTimer);
+      return () => {
+        clearTimeout(playTimer);
+        clearPlaybackAttemptTimers();
+      };
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [player, isPlayerReady, isLoading, transcript]);
+
+    return undefined;
+  }, [player, isPlayerReady, isLoading, transcript, attemptPlayback, clearPlaybackAttemptTimers, playbackLaunchSource]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -240,6 +301,8 @@ function App() {
     setVideoId(extractedId);
     setIsLoading(true);
     setView('player');
+    setPlaybackLaunchSource('home');
+    dashboardStartPromptActiveRef.current = false;
 
     setTranslatedTranscript({}); // Clear previous translations
     setTranslationStatus({});
@@ -281,6 +344,8 @@ function App() {
     setVideoId(youtubeId);
     setIsLoading(true);
     setView('player');
+    setPlaybackLaunchSource('dashboard');
+    dashboardStartPromptActiveRef.current = true;
 
     setTranslatedTranscript({});
     setTranslationStatus({});
@@ -318,6 +383,7 @@ function App() {
   // ---------------------------------------------------------
   const resetPlayerState = useCallback(() => {
     flushProgress();
+    clearPlaybackAttemptTimers();
 
     // Safely pause — player may have been destroyed if view changed
     if (player) {
@@ -340,7 +406,9 @@ function App() {
     setPlayer(null);
     setIsPlayerReady(false);
     setNeedsManualPlay(false);
-  }, [player, flushProgress]);
+    setPlaybackLaunchSource('home');
+    dashboardStartPromptActiveRef.current = false;
+  }, [player, flushProgress, clearPlaybackAttemptTimers]);
 
   const handleBack = () => {
     resetPlayerState();
@@ -348,15 +416,7 @@ function App() {
   };
 
   const handleManualPlay = () => {
-    setNeedsManualPlay(false);
-    if (player) {
-      try {
-        if (currentLineIndex > 0 && currentLineIndex < transcript.length) {
-          player.seekTo(transcript[currentLineIndex].start, true);
-        }
-        player.playVideo();
-      } catch (_) {}
-    }
+    attemptPlayback({ seekToCurrentLine: true, allowMutedFallback: true, unmuteAfterStart: true });
   };
 
   // ---------------------------------------------------------
@@ -744,8 +804,17 @@ function App() {
                       setPlayer(event.target);
                       setIsPlayerReady(true);
                     }}
+                    onStateChange={(event) => {
+                      const state = event?.data;
+                      if (isPlaybackStarted(state)) {
+                        clearPlaybackAttemptTimers();
+                        dashboardStartPromptActiveRef.current = false;
+                        setNeedsManualPlay(false);
+                      }
+                    }}
                     onError={() => {
-                      setNeedsManualPlay(true);
+                      clearPlaybackAttemptTimers();
+                      setNeedsManualPlay(playbackLaunchSource === 'dashboard' && dashboardStartPromptActiveRef.current);
                     }}
                   />
                   {needsManualPlay && !isLoading && transcript.length > 0 && (
