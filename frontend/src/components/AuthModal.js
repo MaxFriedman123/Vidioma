@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 import { useAuth } from '../AuthContext';
 
 export default function AuthModal({ mode: initialMode, onClose }) {
-  const { signUp, logIn, resetPassword, updatePassword } = useAuth();
+  const { signUp, logIn, resetPassword, updatePassword, createProfile } = useAuth();
   const [mode, setMode] = useState(initialMode); // 'login' | 'signup' | 'forgot' | 'reset'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [userRole, setUserRole] = useState('student'); // 'student' | 'teacher'
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
@@ -25,10 +27,39 @@ export default function AuthModal({ mode: initialMode, onClose }) {
 
     try {
       if (mode === 'signup') {
-        await signUp(email, password);
+        if (!fullName.trim() || fullName.trim().length < 2) {
+          setError('Please enter your full name (at least 2 characters).');
+          setLoading(false);
+          return;
+        }
+        const data = await signUp(email, password);
+        // If signup returned a session (auto-confirmed), create profile immediately
+        if (data?.session?.access_token) {
+          try {
+            await createProfile(fullName.trim(), userRole);
+          } catch (profileErr) {
+            console.error('Profile creation after signup failed:', profileErr);
+          }
+        }
+        // Store name+role in sessionStorage so we can create profile after email confirmation login
+        sessionStorage.setItem('vidioma_pending_profile', JSON.stringify({
+          user_name: fullName.trim(),
+          user_role: userRole,
+        }));
         setInfo('Check your email to confirm your account, then log in.');
       } else if (mode === 'login') {
         await logIn(email, password);
+        // Check if there's a pending profile from signup
+        const pending = sessionStorage.getItem('vidioma_pending_profile');
+        if (pending) {
+          try {
+            const { user_name, user_role } = JSON.parse(pending);
+            await createProfile(user_name, user_role);
+            sessionStorage.removeItem('vidioma_pending_profile');
+          } catch {
+            // Profile may already exist or creation may fail — non-blocking
+          }
+        }
         onClose();
       } else if (mode === 'forgot') {
         await resetPassword(email);
@@ -74,6 +105,36 @@ export default function AuthModal({ mode: initialMode, onClose }) {
         <h2 className="auth-title">{title}</h2>
 
         <form onSubmit={handleSubmit} className="auth-form">
+          {mode === 'signup' && (
+            <>
+              <input
+                type="text"
+                placeholder="Full Name"
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                className="auth-input"
+                required
+                minLength={2}
+              />
+              <div className="auth-role-selector">
+                <button
+                  type="button"
+                  className={`auth-role-btn ${userRole === 'student' ? 'auth-role-active' : ''}`}
+                  onClick={() => setUserRole('student')}
+                >
+                  Student
+                </button>
+                <button
+                  type="button"
+                  className={`auth-role-btn ${userRole === 'teacher' ? 'auth-role-active' : ''}`}
+                  onClick={() => setUserRole('teacher')}
+                >
+                  Teacher
+                </button>
+              </div>
+            </>
+          )}
+
           {(mode === 'login' || mode === 'signup' || mode === 'forgot') && (
             <input
               type="email"
