@@ -23,28 +23,34 @@ function timeAgo(dateString) {
 
 export default function Dashboard({ onSelectVideo }) {
   const { accessToken } = useAuth();
-  const [progress, setProgress] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState(() => {
+    try {
+      const cached = localStorage.getItem('vidioma_dashboard_cache');
+      return cached ? JSON.parse(cached) : [];
+    } catch { return []; }
+  });
+  const [loading, setLoading] = useState(() => {
+    return !localStorage.getItem('vidioma_dashboard_cache');
+  });
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!accessToken) {
-      console.log('Dashboard: No accessToken, skipping fetch');
-      return;
-    }
+    if (!accessToken) return;
 
-    console.log('Dashboard: Fetching progress with token:', accessToken.substring(0, 20) + '...');
+    const hasCached = !!localStorage.getItem('vidioma_dashboard_cache');
+    if (!hasCached) setLoading(true);
+
     axios
       .get(`${API_BASE_URL}/api/progress`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       })
       .then((resp) => {
-        console.log('Dashboard fetch success:', resp.data);
-        setProgress(resp.data.progress || []);
+        const data = resp.data.progress || [];
+        setProgress(data);
+        localStorage.setItem('vidioma_dashboard_cache', JSON.stringify(data));
       })
-      .catch((err) => {
-        console.error('Dashboard fetch failed:', err.response?.status, err.response?.data, err.message);
-        setError('Failed to load your progress.');
+      .catch(() => {
+        if (!hasCached) setError('Failed to load your progress.');
       })
       .finally(() => setLoading(false));
   }, [accessToken]);

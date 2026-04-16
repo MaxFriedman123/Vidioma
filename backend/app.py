@@ -9,6 +9,8 @@ from youtube_transcript_api.proxies import GenericProxyConfig
 import re
 import json
 import hashlib
+import string
+import random
 import redis
 import requests as http_requests
 from datetime import datetime, timezone
@@ -434,6 +436,15 @@ def _sb_patch(table, data, params=None):
     return resp.json()
 
 
+def _sb_delete(table, params=None):
+    """DELETE rows from Supabase REST API."""
+    headers = {**SUPABASE_HEADERS}
+    resp = http_requests.delete(f"{SUPABASE_REST_URL}/{table}", headers=headers, params=params or {})
+    if not resp.ok:
+        raise Exception(f"Supabase DELETE {table} failed ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+
 def _ensure_video(youtube_id, title=None, thumbnail_url=None):
     """Insert a video row if it doesn't already exist. Returns the video UUID.
     Updates the title if it was previously missing.
@@ -553,6 +564,333 @@ def get_video_progress(youtube_id):
         return jsonify({"progress": rows[0] if rows else None})
     except Exception as e:
         print(f"GET /api/progress/{youtube_id} error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── User Profile Endpoints ──────────────────────────────────────────────
+
+@app.route("/api/profile", methods=["GET"])
+@require_auth
+def get_profile():
+    """Fetch the authenticated user's profile (name + role)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+    try:
+        rows = _sb_get("user_profiles", {
+            "select": "user_id,user_name,user_role",
+            "user_id": f"eq.{g.user_id}",
+        })
+        return jsonify({"profile": rows[0] if rows else None})
+    except Exception as e:
+        print(f"GET /api/profile error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/profile", methods=["POST"])
+@require_auth
+def create_or_update_profile():
+    """Create or update the user's profile (name + role)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    data = request.get_json()
+    user_name = (data.get("user_name") or "").strip()
+    user_role = (data.get("user_role") or "").strip().lower()
+
+    if not user_name or len(user_name) < 2:
+        return jsonify({"error": "Name must be at least 2 characters"}), 400
+    if user_role and user_role not in ("student", "teacher"):
+        return jsonify({"error": "Role must be 'student' or 'teacher'"}), 400
+
+    try:
+        existing = _sb_get("user_profiles", {"select": "user_id,user_role", "user_id": f"eq.{g.user_id}"})
+
+        if existing:
+            # Update name (and role only if not already set)
+            update_data = {"user_name": user_name}
+            if user_role and not existing[0].get("user_role"):
+                update_data["user_role"] = user_role
+            result = _sb_patch("user_profiles", update_data, {"user_id": f"eq.{g.user_id}"})
+        else:
+            if not user_role:
+                return jsonify({"error": "Role is required for new profiles"}), 400
+            row = {
+                "user_id": g.user_id,
+                "user_name": user_name,
+                "user_role": user_role,
+            }
+            result = _sb_post("user_profiles", row)
+
+        return jsonify({"profile": result[0] if result else None})
+    except Exception as e:
+        print(f"POST /api/profile error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/profile/name", methods=["PATCH"])
+@require_auth
+def update_profile_name():
+    """Update just the user's name (for existing users who lack one)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    data = request.get_json()
+    user_name = (data.get("user_name") or "").strip()
+
+    if not user_name or len(user_name) < 2:
+        return jsonify({"error": "Name must be at least 2 characters"}), 400
+
+    try:
+        existing = _sb_get("user_profiles", {"select": "user_id", "user_id": f"eq.{g.user_id}"})
+        if existing:
+            result = _sb_patch("user_profiles", {"user_name": user_name}, {"user_id": f"eq.{g.user_id}"})
+        else:
+            # Edge case: profile row doesn't exist yet — can't set name without role
+            return jsonify({"error": "Profile not found. Please complete signup first."}), 404
+        return jsonify({"profile": result[0] if result else None})
+    except Exception as e:
+        print(f"PATCH /api/profile/name error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Class Endpoints ─────────────────────────────────────────────────────
+
+def _generate_class_code():
+    """Generate a unique 6-character alphanumeric class code."""
+    chars = string.ascii_uppercase + string.digits
+    for _ in range(20):  # max attempts
+        code = ''.join(random.choices(chars, k=6))
+        existing = _sb_get("classes", {"select": "class_id", "class_code": f"eq.{code}"})
+        if not existing:
+            return code
+    raise Exception("Failed to generate unique class code after 20 attempts")
+
+
+@app.route("/api/classes", methods=["POST"])
+@require_auth
+def create_class():
+    """Create a new class (teacher only)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    # Verify user is a teacher
+    profile = _sb_get("user_profiles", {"select": "user_role", "user_id": f"eq.{g.user_id}"})
+    if not profile or profile[0].get("user_role") != "teacher":
+        return jsonify({"error": "Only teachers can create classes"}), 403
+
+    data = request.get_json()
+    class_name = (data.get("class_name") or "").strip()
+    if not class_name:
+        return jsonify({"error": "Class name is required"}), 400
+
+    description = (data.get("description") or "").strip() or None
+    subject = (data.get("subject") or "").strip() or None
+    grade = (data.get("grade") or "").strip() or None
+
+    try:
+        class_code = _generate_class_code()
+        row = {
+            "class_name": class_name,
+            "description": description,
+            "class_code": class_code,
+            "teacher_id": g.user_id,
+            "subject": subject,
+            "grade": grade,
+            "is_active": True,
+        }
+        result = _sb_post("classes", row)
+        return jsonify({"class": result[0] if result else None}), 201
+    except Exception as e:
+        print(f"POST /api/classes error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/classes", methods=["GET"])
+@require_auth
+def get_classes():
+    """Get all classes for the authenticated user (teacher's classes or student's enrolled classes)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        profile = _sb_get("user_profiles", {"select": "user_role", "user_id": f"eq.{g.user_id}"})
+        if not profile:
+            return jsonify({"classes": []})
+
+        role = profile[0].get("user_role")
+
+        if role == "teacher":
+            classes = _sb_get("classes", {
+                "select": "*, student_classes(count)",
+                "teacher_id": f"eq.{g.user_id}",
+                "is_active": "eq.true",
+                "order": "created_at.desc",
+            })
+            return jsonify({"classes": classes, "role": "teacher"})
+        else:
+            # Student: get classes they've joined
+            enrollments = _sb_get("student_classes", {
+                "select": "class_id, joined_at, classes(*, user_profiles!classes_teacher_id_fkey(user_name))",
+                "student_id": f"eq.{g.user_id}",
+            })
+            # Flatten the response
+            classes = []
+            for e in enrollments:
+                cls = e.get("classes")
+                if cls and cls.get("is_active"):
+                    cls["joined_at"] = e.get("joined_at")
+                    classes.append(cls)
+            return jsonify({"classes": classes, "role": "student"})
+    except Exception as e:
+        print(f"GET /api/classes error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/classes/<class_id>", methods=["GET"])
+@require_auth
+def get_class_detail(class_id):
+    """Get detailed class info including teacher and student list."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        # Fetch class info
+        classes = _sb_get("classes", {
+            "select": "*, user_profiles!classes_teacher_id_fkey(user_name, user_role)",
+            "class_id": f"eq.{class_id}",
+        })
+        if not classes:
+            return jsonify({"error": "Class not found"}), 404
+
+        cls = classes[0]
+
+        # Verify the user is the teacher or an enrolled student
+        is_teacher = cls["teacher_id"] == g.user_id
+        if not is_teacher:
+            enrollment = _sb_get("student_classes", {
+                "select": "student_class_id",
+                "class_id": f"eq.{class_id}",
+                "student_id": f"eq.{g.user_id}",
+            })
+            if not enrollment:
+                return jsonify({"error": "Access denied"}), 403
+
+        # Fetch enrolled students
+        students = _sb_get("student_classes", {
+            "select": "student_class_id, student_id, joined_at, user_profiles!student_classes_student_id_fkey(user_name)",
+            "class_id": f"eq.{class_id}",
+            "order": "joined_at.asc",
+        })
+
+        return jsonify({
+            "class": cls,
+            "students": students,
+            "is_teacher": is_teacher,
+        })
+    except Exception as e:
+        print(f"GET /api/classes/{class_id} error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/classes/join", methods=["POST"])
+@require_auth
+def join_class():
+    """Student joins a class via class code."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    # Verify user is a student
+    profile = _sb_get("user_profiles", {"select": "user_role", "user_id": f"eq.{g.user_id}"})
+    if not profile or profile[0].get("user_role") != "student":
+        return jsonify({"error": "Only students can join classes"}), 403
+
+    data = request.get_json()
+    class_code = (data.get("class_code") or "").strip().upper()
+    if not class_code or len(class_code) != 6:
+        return jsonify({"error": "Please enter a valid 6-character class code"}), 400
+
+    try:
+        # Find the class
+        classes = _sb_get("classes", {
+            "select": "class_id, class_name, is_active",
+            "class_code": f"eq.{class_code}",
+        })
+        if not classes or not classes[0].get("is_active"):
+            return jsonify({"error": "Class not found. Please check the code and try again."}), 404
+
+        cls = classes[0]
+
+        # Check if already enrolled
+        existing = _sb_get("student_classes", {
+            "select": "student_class_id",
+            "class_id": f"eq.{cls['class_id']}",
+            "student_id": f"eq.{g.user_id}",
+        })
+        if existing:
+            return jsonify({"error": "You are already enrolled in this class"}), 409
+
+        # Enroll the student
+        row = {
+            "class_id": cls["class_id"],
+            "student_id": g.user_id,
+        }
+        _sb_post("student_classes", row)
+        return jsonify({"message": f"Successfully joined {cls['class_name']}", "class_id": cls["class_id"]}), 200
+    except Exception as e:
+        print(f"POST /api/classes/join error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/classes/<class_id>", methods=["DELETE"])
+@require_auth
+def delete_class(class_id):
+    """Delete a class (teacher only)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        classes = _sb_get("classes", {"select": "class_id, teacher_id", "class_id": f"eq.{class_id}"})
+        if not classes:
+            return jsonify({"error": "Class not found"}), 404
+        if classes[0]["teacher_id"] != g.user_id:
+            return jsonify({"error": "Only the class teacher can delete this class"}), 403
+
+        # Remove all student enrollments first
+        _sb_delete("student_classes", {"class_id": f"eq.{class_id}"})
+        # Delete the class
+        _sb_delete("classes", {"class_id": f"eq.{class_id}"})
+        return jsonify({"message": "Class deleted successfully"})
+    except Exception as e:
+        print(f"DELETE /api/classes/{class_id} error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/classes/<class_id>/students/<student_id>", methods=["DELETE"])
+@require_auth
+def remove_student(class_id, student_id):
+    """Remove a student from a class. Teacher can remove any student; student can remove themselves."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        # Verify authorization
+        classes = _sb_get("classes", {"select": "teacher_id", "class_id": f"eq.{class_id}"})
+        if not classes:
+            return jsonify({"error": "Class not found"}), 404
+
+        is_teacher = classes[0]["teacher_id"] == g.user_id
+        is_self = student_id == g.user_id
+
+        if not is_teacher and not is_self:
+            return jsonify({"error": "Not authorized to remove this student"}), 403
+
+        _sb_delete("student_classes", {
+            "class_id": f"eq.{class_id}",
+            "student_id": f"eq.{student_id}",
+        })
+        return jsonify({"message": "Student removed from class"})
+    except Exception as e:
+        print(f"DELETE /api/classes/{class_id}/students/{student_id} error: {e}")
         return jsonify({"error": str(e)}), 500
 
 

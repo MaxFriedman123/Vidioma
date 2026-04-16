@@ -10,6 +10,13 @@ export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [passwordRecoveryPending, setPasswordRecoveryPending] = useState(false);
+  const [userProfile, setUserProfile] = useState(() => {
+    try {
+      const cached = localStorage.getItem('vidioma_user_profile');
+      return cached ? JSON.parse(cached) : null;
+    } catch { return null; }
+  });
+  const [profileLoading, setProfileLoading] = useState(false);
 
   // ── Bootstrap session ──────────────────────────────────────────────
   useEffect(() => {
@@ -36,6 +43,68 @@ export function AuthProvider({ children }) {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // ── Persist profile to localStorage ─────────────────────────────────
+  const setAndCacheProfile = useCallback((profile) => {
+    setUserProfile(profile);
+    if (profile) {
+      localStorage.setItem('vidioma_user_profile', JSON.stringify(profile));
+    } else {
+      localStorage.removeItem('vidioma_user_profile');
+    }
+  }, []);
+
+  // ── Fetch user profile when session changes ────────────────────────
+  const fetchProfile = useCallback(async (token) => {
+    if (!token) { setAndCacheProfile(null); return; }
+    // Only show loading spinner if we have no cached profile
+    const hasCached = !!localStorage.getItem('vidioma_user_profile');
+    if (!hasCached) setProfileLoading(true);
+    try {
+      const resp = await axios.get(`${API_BASE_URL}/api/profile`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setAndCacheProfile(resp.data.profile || null);
+    } catch {
+      // Keep cached profile on network error; only clear if we had none
+      if (!hasCached) setAndCacheProfile(null);
+    } finally {
+      setProfileLoading(false);
+    }
+  }, [setAndCacheProfile]);
+
+  useEffect(() => {
+    if (session?.access_token) {
+      fetchProfile(session.access_token);
+    } else {
+      setAndCacheProfile(null);
+    }
+  }, [session, fetchProfile, setAndCacheProfile]);
+
+  const createProfile = useCallback(async (userName, userRole) => {
+    if (!session?.access_token) throw new Error('Not authenticated');
+    const resp = await axios.post(`${API_BASE_URL}/api/profile`, {
+      user_name: userName,
+      user_role: userRole,
+    }, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const profile = resp.data.profile;
+    setAndCacheProfile(profile);
+    return profile;
+  }, [session, setAndCacheProfile]);
+
+  const updateProfileName = useCallback(async (userName) => {
+    if (!session?.access_token) throw new Error('Not authenticated');
+    const resp = await axios.patch(`${API_BASE_URL}/api/profile/name`, {
+      user_name: userName,
+    }, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const profile = resp.data.profile;
+    setAndCacheProfile(profile);
+    return profile;
+  }, [session, setAndCacheProfile]);
 
   // ── Migrate localStorage progress on first login ───────────────────
   useEffect(() => {
@@ -125,6 +194,9 @@ export function AuthProvider({ children }) {
   const logOut = useCallback(async () => {
     if (!supabase) return;
     sessionStorage.removeItem('vidioma_progress_migrated');
+    localStorage.removeItem('vidioma_user_profile');
+    localStorage.removeItem('vidioma_classes_cache');
+    localStorage.removeItem('vidioma_dashboard_cache');
     // Clear all localStorage progress so it doesn't leak to the next account
     const keysToRemove = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -150,6 +222,11 @@ export function AuthProvider({ children }) {
     passwordRecoveryPending,
     clearPasswordRecovery: () => setPasswordRecoveryPending(false),
     isAuthenticated: !!session,
+    userProfile,
+    profileLoading,
+    createProfile,
+    updateProfileName,
+    refreshProfile: () => fetchProfile(session?.access_token),
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
