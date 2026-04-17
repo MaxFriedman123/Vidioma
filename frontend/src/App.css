@@ -10,13 +10,23 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* "safe center" falls back to flex-start when content overflows the
+     viewport — prevents the top of tall content (dashboard/classes) from
+     being clipped and unscrollable on mobile. */
+  justify-content: safe center;
   font-size: calc(10px + 2vmin);
   color: white;
   position: relative; /* Needed for absolute positioning the sparkle */
   overflow-x: hidden;
   width: 100%;
   box-sizing: border-box;
+}
+
+/* Tall content views anchor to the top so the navbar doesn't overlap them. */
+.App-header:has(.dashboard),
+.App-header:has(.class-dashboard),
+.App-header:has(.class-view) {
+  justify-content: flex-start;
 }
 
 .landing-container {
@@ -626,6 +636,11 @@
   display: none;
 }
 
+.navbar-mobile-controls {
+  display: none;
+  position: relative;
+}
+
 /* ---------------------------------------------------
    RESPONSIVE: TABLET & MOBILE (<=768px)
 --------------------------------------------------- */
@@ -1109,12 +1124,9 @@
   color: #ff6b6b;
 }
 
-/* Mobile: avatar replaces hamburger for logged-in users */
-.navbar-mobile-controls {
-  display: none;
-  position: relative;
-}
-
+/* Mobile: avatar replaces hamburger for logged-in users.
+   (Base `display: none` is declared at the top, next to the other
+   navbar mobile rules, so the mobile media query can override it.) */
 .navbar-avatar-mobile {
   width: 32px;
   height: 32px;
@@ -1888,6 +1900,8 @@
   .class-dashboard {
     padding: 0 14px;
     margin: 24px auto;
+    max-width: 100vw;
+    overflow-x: hidden;
   }
 
   .class-dashboard-header {
@@ -1895,30 +1909,124 @@
     gap: 12px;
   }
 
+  .class-dashboard-header .dashboard-title {
+    font-size: 1.4rem;
+  }
+
+  .class-action-btn {
+    font-size: 0.85rem;
+    padding: 9px 16px;
+  }
+
   .class-grid {
     grid-template-columns: 1fr;
   }
 
+  .class-card {
+    padding: 16px;
+  }
+
+  .class-card-header {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
   .class-header {
     flex-direction: column;
+    gap: 14px;
+    margin-bottom: 22px;
   }
 
   .class-code-section {
     width: 100%;
     box-sizing: border-box;
+    padding: 14px 16px;
+  }
+
+  .class-code-large {
+    font-size: 1.4rem;
+    letter-spacing: 3px;
+    padding: 6px 12px;
   }
 
   .class-view {
     padding: 0 14px;
+    margin: 16px auto;
+    max-width: 100vw;
+    overflow-x: hidden;
   }
 
   .class-header-name {
     font-size: 1.4rem;
   }
 
+  .class-header-tags {
+    flex-wrap: wrap;
+  }
+
+  .class-section {
+    margin-bottom: 20px;
+  }
+
+  .class-member-card {
+    padding: 12px 14px;
+    gap: 12px;
+  }
+
+  .class-member-name {
+    font-size: 0.9rem;
+  }
+
+  .class-remove-btn {
+    font-size: 0.7rem;
+    padding: 4px 10px;
+  }
+
   .class-code-banner {
     font-size: 0.8rem;
     flex-direction: column;
     text-align: center;
+    padding: 12px;
+    gap: 8px;
+  }
+
+  .class-code-banner .class-code-display {
+    font-size: 1.1rem;
+    letter-spacing: 2px;
+  }
+
+  .class-confirm-modal {
+    width: calc(100vw - 32px);
+    max-width: calc(100vw - 32px);
+  }
+
+  .class-confirm-actions {
+    flex-wrap: wrap;
+  }
+
+  .class-confirm-actions .navbar-btn,
+  .class-confirm-actions .class-delete-btn {
+    flex: 1 1 auto;
+    min-width: 110px;
+  }
+}
+
+@media (max-width: 400px) {
+  .class-header-name {
+    font-size: 1.25rem;
+  }
+
+  .class-code-large {
+    font-size: 1.2rem;
+    letter-spacing: 2px;
+  }
+
+  .class-action-btn {
+    width: 100%;
+  }
+
+  .class-code-banner .class-code-display {
+    font-size: 1rem;
+    letter-spacing: 1px;
   }
 }
