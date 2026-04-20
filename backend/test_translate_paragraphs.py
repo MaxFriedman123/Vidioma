@@ -12,32 +12,11 @@ or with pytest:
 import unittest
 
 from app import (
-    _batch_paragraphs,
     _proportional_sentence_split,
     _recover_chunks,
     align_lines_to_paragraph,
     translate_paragraphs,
 )
-
-
-class TestBatchParagraphs(unittest.TestCase):
-    def test_groups_fit_under_limit(self):
-        paragraphs = [(0, "a" * 2000), (1, "b" * 2000), (2, "c" * 2000)]
-        batches = _batch_paragraphs(paragraphs, 4500)
-        # Two paragraphs fit (2000 + 2 + 2000 = 4002 <= 4500), third starts new batch
-        self.assertEqual(len(batches), 2)
-        self.assertEqual([i for i, _ in batches[0]], [0, 1])
-        self.assertEqual([i for i, _ in batches[1]], [2])
-
-    def test_single_oversized_paragraph_still_gets_own_batch(self):
-        paragraphs = [(0, "x" * 10000)]
-        batches = _batch_paragraphs(paragraphs, 4500)
-        self.assertEqual(len(batches), 1)
-
-    def test_preserves_original_indices(self):
-        paragraphs = [(5, "short"), (9, "also short")]
-        batches = _batch_paragraphs(paragraphs, 4500)
-        self.assertEqual(batches, [[(5, "short"), (9, "also short")]])
 
 
 class TestRecoverChunks(unittest.TestCase):
@@ -141,7 +120,7 @@ class TestTranslateParagraphsOrchestration(unittest.TestCase):
         self.assertTrue(result[0])
         self.assertTrue(result[2])
 
-    def test_batch_failure_triggers_per_paragraph_fallback(self):
+    def test_full_text_failure_triggers_per_paragraph_fallback(self):
         fake = FakeTranslator(fail_batch=True)
         import app
 
@@ -152,7 +131,7 @@ class TestTranslateParagraphsOrchestration(unittest.TestCase):
         finally:
             app.GoogleTranslator = original
 
-        # Each paragraph was translated individually after the batch failed.
+        # Each paragraph was translated individually after full-text failed.
         self.assertEqual(result, ["ONE.", "TWO."])
 
     def test_strip_newlines_still_recovers_via_sentence_alignment(self):
