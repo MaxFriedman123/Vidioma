@@ -515,6 +515,109 @@
   margin-bottom: 20px;
 }
 
+/* Star-wars style scrolling transcript window */
+.scroll-window {
+  width: 100%;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  animation: scroll-advance 450ms ease-out;
+}
+
+.scroll-line {
+  width: 100%;
+  text-align: center;
+  transition: opacity 300ms ease, filter 300ms ease, color 300ms ease, transform 300ms ease;
+  line-height: 1.3;
+}
+
+.scroll-line-prev,
+.scroll-line-next {
+  font-size: 1rem;
+  color: #888;
+  opacity: 0.55;
+  min-height: 1.3em;
+}
+
+.scroll-line-prev {
+  filter: blur(0.4px);
+}
+
+.scroll-line-next {
+  filter: blur(0.6px);
+  opacity: 0.4;
+}
+
+.scroll-line-current {
+  /* Reset heading defaults so it sits flush in the scroll stack */
+  margin: 0;
+  font-size: 1.8rem;
+  color: #61dafb;
+  font-weight: 700;
+}
+
+@keyframes scroll-advance {
+  from {
+    transform: translateY(14px);
+    opacity: 0.4;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Translation scroll — same 3-line rhythm as the source transcript */
+.translation-scroll-window {
+  margin-bottom: 0;
+}
+
+/* Prev and next translation lines are fully blurred so no text is readable;
+   only the current line's flashlight reveal exposes text. Keeps neighboring
+   translations from spoiling upcoming lines or pulling attention away from
+   the current one. */
+.translation-line {
+  color: #a8c9b4;
+  opacity: 0.55;
+  filter: blur(8px);
+  font-size: 1rem;
+  user-select: none;
+  pointer-events: none;
+}
+
+.translation-current-wrap {
+  position: relative;
+  width: 100%;
+  min-height: 1.3em;
+}
+
+.translation-current-wrap .clear-flashlight-layer {
+  /* Clear layer sits on top of the blurred base inside the current-line slot */
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+/* Prev/next translation lines: same dual-layer as the current line so the
+   flashlight cursor also reveals text above and below, not just the active
+   line. The base stays blurred; the mask-clipped top layer shows through. */
+.translation-line-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.translation-line-wrap .translation-line.clear-flashlight-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  filter: none;          /* override the .translation-line blur inside the mask */
+  opacity: 1;            /* fully visible where the mask reveals it */
+  color: #d8eed8;        /* slightly dimmer than current-line reveal (#fff) */
+}
+
 /* Input Styling */
 .big-input {
   font-size: 1.2rem;
@@ -760,6 +863,15 @@
   .current-text {
     font-size: 1.2rem;
     margin-bottom: 14px;
+  }
+
+  .scroll-line-current {
+    font-size: 1.2rem;
+  }
+
+  .scroll-line-prev,
+  .scroll-line-next {
+    font-size: 0.85rem;
   }
 
   .big-input {
