@@ -1265,6 +1265,7 @@ def remove_student(class_id, student_id):
 # ── Admin Cache Endpoints ────────────────────────────────────────────────
 
 @app.route('/api/admin/clear-translation-cache', methods=['POST'])
+@optional_auth
 def clear_translation_cache():
     """
     Clear all translation cache entries. Requires auth token.
