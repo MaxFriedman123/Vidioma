@@ -386,24 +386,19 @@ def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
         "lines": lines_by_paragraph,  # None ↔ old shape, list ↔ new shape
     }
     key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "translate_paragraphs:v3:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    return "translate_paragraphs:v4:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
 
 
 _PARAGRAPH_SEPARATOR = "\n\n"
 _TARGET_SENTENCE_RE = re.compile(r'(?<=[.!?…])\s+')
 
 _TRANSLATORS_IMPORT_FAILED = False
+_BING_COOLDOWN_UNTIL = 0.0  # epoch seconds — skip Bing while rate-limited
+_BING_COOLDOWN_SECONDS = 120
 
 
-def _bing_translate(text, target_lang, source_lang, attempts=3):
-    """Translate via Bing (through the `translators` package).
-
-    Bing handles elephant 'trunks' → 'trompas' correctly where the free
-    Google endpoint gives 'baúles' (luggage). Returns None on failure so
-    the caller can fall back. Retries transient websocket errors a few times
-    before giving up — the free Bing endpoint intermittently returns
-    "Unexpected frame type".
-    """
+def _ts_translate(engine, text, target_lang, source_lang, attempts=1):
+    """Generic wrapper for a `translators` package engine. Returns None on failure."""
     global _TRANSLATORS_IMPORT_FAILED
     if _TRANSLATORS_IMPORT_FAILED:
         return None
@@ -412,7 +407,7 @@ def _bing_translate(text, target_lang, source_lang, attempts=3):
     try:
         import translators as ts
     except Exception as exc:
-        print(f"translators import failed: {exc}; Bing disabled for this process")
+        print(f"translators import failed: {exc}; package disabled for this process")
         _TRANSLATORS_IMPORT_FAILED = True
         return None
     src = "auto" if (source_lang or "auto") == "auto" else source_lang
@@ -421,7 +416,7 @@ def _bing_translate(text, target_lang, source_lang, attempts=3):
         try:
             return ts.translate_text(
                 text,
-                translator="bing",
+                translator=engine,
                 from_language=src,
                 to_language=target_lang,
             )
@@ -430,17 +425,47 @@ def _bing_translate(text, target_lang, source_lang, attempts=3):
             if attempt + 1 < attempts:
                 import time
                 time.sleep(0.4 * (attempt + 1))
-    print(f"Bing translate failed after {attempts} attempts ({last_exc}); falling back to Google")
-    return None
+    return last_exc
+
+
+def _bing_translate(text, target_lang, source_lang, attempts=3):
+    """Translate via Bing.
+
+    Bing handles elephant 'trunks' → 'trompas' where the free Google endpoint
+    gives 'baúles' (luggage). Skips Bing entirely for ~2 min after a 429 to
+    avoid hammering the rate-limiter. Returns None on failure.
+    """
+    global _BING_COOLDOWN_UNTIL
+    import time
+    if time.time() < _BING_COOLDOWN_UNTIL:
+        return None
+    result = _ts_translate("bing", text, target_lang, source_lang, attempts=attempts)
+    if isinstance(result, Exception):
+        msg = str(result)
+        if "429" in msg or "Too Many Requests" in msg:
+            _BING_COOLDOWN_UNTIL = time.time() + _BING_COOLDOWN_SECONDS
+            print(f"Bing rate-limited (429); cooling down for {_BING_COOLDOWN_SECONDS}s")
+        else:
+            print(f"Bing translate failed ({msg}); falling back")
+        return None
+    return result
 
 
 def _translate_text(text, target_lang, source_lang="auto"):
-    """Translate `text` using Bing first, then Google as fallback."""
+    """Quality-first cascade: Bing → Alibaba → Google.
+
+    Bing is best but rate-limits Render's IP; Alibaba is a decent free fallback
+    that doesn't return 'baúles' for elephant trunks; Google is the final safety
+    net (worst quality for context-sensitive words).
+    """
     if not (text or "").strip():
         return ""
     bing = _bing_translate(text, target_lang, source_lang)
     if bing:
         return bing
+    alibaba = _ts_translate("alibaba", text, target_lang, source_lang)
+    if alibaba and not isinstance(alibaba, Exception):
+        return alibaba
     translator = GoogleTranslator(source=source_lang, target=target_lang)
     return translator.translate(text) or ""
 
@@ -708,12 +733,16 @@ def _translate_line_anchors(lines_flat, target_lang, source_lang, max_workers=8)
     if not lines_flat:
         return []
 
+    # Anchors are only used for DP alignment fingerprinting — Google's output
+    # is good enough as a per-line signal and avoids hammering Bing with 8
+    # parallel calls (which triggers 429 rate limits on Render's shared IP).
     def _one(text):
         clean = (text or "").replace("\n", " ").strip()
         if not clean:
             return ""
         try:
-            return (_translate_text(clean, target_lang, source_lang) or clean).strip()
+            translator = GoogleTranslator(source=source_lang, target=target_lang)
+            return (translator.translate(clean) or clean).strip()
         except Exception as exc:
             print(f"Line anchor translate failed: {exc}")
             return clean
@@ -1329,7 +1358,7 @@ def clear_translation_cache():
         return jsonify({"error": "Redis not configured"}), 503
 
     try:
-        patterns = ["translate_paragraphs:*", "translate_paragraphs:v3:*"]
+        patterns = ["translate_paragraphs:*", "translate_paragraphs:v4:*"]
         total_deleted = 0
         for pattern in patterns:
             keys = redis_client.keys(pattern)
