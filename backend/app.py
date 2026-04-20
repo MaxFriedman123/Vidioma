@@ -16,6 +16,7 @@ import requests as http_requests
 from datetime import datetime, timezone
 from deep_translator import GoogleTranslator
 from functools import lru_cache, wraps
+from concurrent.futures import ThreadPoolExecutor
 import jwt
 
 app = Flask(__name__)
@@ -227,15 +228,118 @@ def get_cached_transcript(video_id, from_lang):
         proxy_api = YouTubeTranscriptApi(proxy_config=proxy_config)
         return attempt_fetch(proxy_api)
 
+_SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*\s*$')
+# Paragraph sizing: translation quality benefits from context, but the unit
+# should still be short enough that a fuzzy substring match stays meaningful.
+_PARAGRAPH_TIME_GAP = 2.0
+_MAX_PARAGRAPH_FRAGMENTS = 6
+_MAX_PARAGRAPH_CHARS = 350
+
+
+def _ends_sentence(text):
+    return bool(_SENTENCE_END_RE.search(text))
+
+
+def group_into_paragraphs(fragments):
+    """
+    Assign each fragment to a paragraph and return (fragments_with_paragraph, paragraph_texts).
+
+    A paragraph groups a handful of consecutive fragments so translation sees
+    enough context to produce a natural target-language rendering. The
+    frontend still plays line by line — paragraphs only exist to give the
+    translator room.
+
+    Boundaries:
+      - Force new paragraph when the gap between fragments exceeds
+        _PARAGRAPH_TIME_GAP seconds (speaker pause).
+      - Prefer to end at sentence-final punctuation (".!?…") once we already
+        have enough content.
+      - Hard cap at _MAX_PARAGRAPH_FRAGMENTS fragments or _MAX_PARAGRAPH_CHARS
+        characters to keep paragraphs usefully small.
+    """
+    assigned = []
+    paragraphs = []
+
+    buf_texts = []
+    buf_start_time = None
+    buf_last_end = None
+    paragraph_index = 0
+
+    MIN_FRAGMENTS_FOR_SENTENCE_BREAK = 2
+
+    def flush():
+        if not buf_texts:
+            return
+        paragraph_text = re.sub(r"\s+", " ", " ".join(buf_texts)).strip()
+        paragraphs.append(paragraph_text)
+
+    for frag in fragments:
+        text = frag["source"].strip()
+        if not text:
+            continue
+
+        gap = 0.0
+        if buf_last_end is not None:
+            gap = max(0.0, frag["start"] - buf_last_end)
+
+        current_chars = sum(len(t) for t in buf_texts) + max(0, len(buf_texts) - 1)
+
+        break_before = (
+            buf_texts
+            and (
+                gap >= _PARAGRAPH_TIME_GAP
+                or len(buf_texts) >= _MAX_PARAGRAPH_FRAGMENTS
+                or current_chars + len(text) + 1 >= _MAX_PARAGRAPH_CHARS
+            )
+        )
+
+        if break_before:
+            flush()
+            paragraph_index += 1
+            buf_texts = []
+            buf_start_time = None
+            buf_last_end = None
+
+        if buf_start_time is None:
+            buf_start_time = frag["start"]
+
+        buf_texts.append(text)
+        buf_last_end = frag["start"] + frag["duration"]
+
+        assigned.append({
+            "source": text,
+            "start": frag["start"],
+            "duration": frag["duration"],
+            "paragraph": paragraph_index,
+        })
+
+        # Close paragraph opportunistically on sentence punctuation once we
+        # already have enough content for the translator to work with.
+        if _ends_sentence(text) and len(buf_texts) >= MIN_FRAGMENTS_FOR_SENTENCE_BREAK:
+            flush()
+            paragraph_index += 1
+            buf_texts = []
+            buf_start_time = None
+            buf_last_end = None
+
+    flush()
+    return assigned, paragraphs
+
+
 @lru_cache(maxsize=100)
 def get_cached_processed_snippets(video_id, from_lang):
     """
-    Cache final snippet output (already filtered and optionally translated).
-    This is what /api/transcript should return directly on cache hits.
+    Fetch and clean the transcript, group fragments into paragraphs, and —
+    when the transcript is from a different language than requested — also
+    return paragraph-level translations into the source language.
+
+    Returns (snippets, paragraphs) where each snippet is
+    {source, start, duration, paragraph} and paragraphs is a list of strings
+    aligned to the paragraph indices on the snippets.
     """
     source_transcript, is_correct_lang = get_cached_transcript(video_id, from_lang)
 
-    cleaned_snippets = []
+    cleaned_fragments = []
 
     for snippet in source_transcript:
         # Support both object-style and dict-style transcript entries
@@ -258,96 +362,365 @@ def get_cached_processed_snippets(video_id, from_lang):
         if not re.search(r'[^\W\d_]', text, re.UNICODE):
             continue
 
-        cleaned_snippets.append({
+        cleaned_fragments.append({
             "source": text,
             "start": start,
             "duration": duration
         })
 
+    assigned, paragraphs = group_into_paragraphs(cleaned_fragments)
+
     # Only translate when transcript is not already in requested language
-    if not is_correct_lang and cleaned_snippets:
+    if not is_correct_lang and paragraphs:
         print(f"Manually translating {video_id} to {from_lang}")
-        cleaned_snippets = translate_with_context(cleaned_snippets, from_lang)
+        paragraphs = translate_paragraphs(paragraphs, from_lang)
 
-    return cleaned_snippets
+    return assigned, paragraphs
 
-# This function translates snippets in batches to preserve context, then recombines them.
-def generate_cache_key(from_lang, to_lang, snippets):
-    """Generate a cache key for translation results."""
+def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
+    """Generate a cache key for paragraph + per-line translation results."""
     key_payload = {
         "from": from_lang.lower(),
         "to": to_lang.lower(),
-        "snippets": snippets
+        "paragraphs": paragraphs,
+        "lines": lines_by_paragraph,  # None ↔ old shape, list ↔ new shape
     }
     key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "translate:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    return "translate_paragraphs:v2:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
 
-def translate_with_context(snippets, target_lang, source_lang='auto'):
+
+_PARAGRAPH_SEPARATOR = "\n\n"
+_TRANSLATE_BATCH_CHAR_LIMIT = 4500  # safety margin under Google Translate's 5000
+_TARGET_SENTENCE_RE = re.compile(r'(?<=[.!?…])\s+')
+
+
+def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
+    """
+    Translate all paragraphs in one (or few) calls for maximum cross-paragraph
+    context, then recover per-paragraph chunks. This preserves pronoun
+    resolution, consistent terminology, and register across the whole
+    transcript — things that paragraph-by-paragraph translation loses.
+
+    Recovery cascade:
+      1. Newline split — Google Translate usually preserves paragraph breaks.
+      2. Sentence-boundary proportional alignment — for languages/inputs where
+         newlines get mangled, map source-paragraph char ratios onto sentences
+         in the translated text.
+      3. Per-paragraph translate — last-resort fallback, same as the old
+         behaviour. Keeps us correct even if the batched call fails entirely.
+    """
+    if not paragraphs:
+        return []
+
     translator = GoogleTranslator(source=source_lang, target=target_lang)
+    result = ["" for _ in paragraphs]
+    non_empty = [(i, (p or "").replace("\n", " ").strip()) for i, p in enumerate(paragraphs)]
+    non_empty = [(i, t) for i, t in non_empty if t]
+    if not non_empty:
+        return result
 
-    # @@<index>@@ <text> format with newline separators is used to mark snippet boundaries
-    max_chars = 4500
+    for batch in _batch_paragraphs(non_empty, _TRANSLATE_BATCH_CHAR_LIMIT):
+        _translate_batch_into(result, batch, translator)
+    return result
 
-    all_translated = {}
 
-    def process_chunk(indexed_texts):
-        if not indexed_texts:
-            return
-
-        combined = "\n".join(f"@@{idx}@@ {txt}" for idx, txt in indexed_texts)
-        translated = translator.translate(combined) or ""
-
-        # Parse translated output by markers (tolerant to whitespace)
-        pattern = re.compile(r"@@\s*(\d+)\s*@@\s*")
-        matches = list(pattern.finditer(translated))
-
-        if not matches:
-            # Fallback: if markers were destroyed, keep originals for this chunk
-            for idx, txt in indexed_texts:
-                all_translated[idx] = txt
-            return
-
-        for i, m in enumerate(matches):
-            idx = int(m.group(1))
-            start = m.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(translated)
-            text_part = translated[start:end].strip()
-            all_translated[idx] = text_part
-
-        # Fill any missing ids with original text
-        for idx, txt in indexed_texts:
-            if idx not in all_translated or not all_translated[idx]:
-                all_translated[idx] = txt
-
-    current_chunk = []
+def _batch_paragraphs(indexed, char_limit):
+    """Split (index, text) pairs into batches that fit within char_limit."""
+    batches = []
+    current = []
     current_len = 0
-
-    for i, snippet in enumerate(snippets):
-        text = snippet['source'].replace('\n', ' ').strip()
-        line = f"@@{i}@@ {text}"
-        add_len = len(line) + 1  # + newline
-
-        if current_chunk and current_len + add_len > max_chars:
-            process_chunk(current_chunk)
-            current_chunk = []
+    sep_len = len(_PARAGRAPH_SEPARATOR)
+    for idx, text in indexed:
+        added = len(text) + (sep_len if current else 0)
+        if current and current_len + added > char_limit:
+            batches.append(current)
+            current = []
             current_len = 0
+            added = len(text)
+        current.append((idx, text))
+        current_len += added
+    if current:
+        batches.append(current)
+    return batches
 
-        current_chunk.append((i, text))
-        current_len += add_len
 
-    if current_chunk:
-        process_chunk(current_chunk)
+def _translate_batch_into(result, batch, translator):
+    """Translate one batch as a single call and write chunks into result."""
+    joined = _PARAGRAPH_SEPARATOR.join(text for _, text in batch)
+    translated = None
+    try:
+        translated = translator.translate(joined) or ""
+    except Exception as exc:
+        print(f"Batch translate failed: {exc}; falling back per-paragraph")
 
-    translated_snippets = []
-    for i, snippet in enumerate(snippets):
-        trans_text = all_translated.get(i, snippet['source'].replace('\n', ' ').strip())
-        translated_snippets.append({
-            'source': trans_text,
-            'start': snippet['start'],
-            'duration': snippet['duration']
-        })
+    chunks = _recover_chunks(translated, [t for _, t in batch]) if translated else None
+    if chunks is None:
+        for idx, text in batch:
+            try:
+                result[idx] = (translator.translate(text) or text).strip()
+            except Exception as exc:
+                print(f"Per-paragraph fallback failed: {exc}")
+                result[idx] = text
+        return
+    for (idx, _), chunk in zip(batch, chunks):
+        result[idx] = chunk.strip()
 
-    return translated_snippets
+
+def _recover_chunks(translated, source_paragraphs):
+    """
+    Recover N paragraph-aligned chunks from a single translated string.
+    Returns a list of length len(source_paragraphs), or None if recovery
+    isn't confident enough (caller should fall back).
+    """
+    if not translated or not source_paragraphs:
+        return None
+
+    n = len(source_paragraphs)
+    if n == 1:
+        return [translated.strip()]
+
+    # 1) Newline split — Google Translate usually preserves paragraph breaks.
+    for sep in ("\n\n", "\n"):
+        parts = [p.strip() for p in translated.split(sep) if p.strip()]
+        if len(parts) == n:
+            return parts
+
+    # 2) Proportional sentence alignment.
+    return _proportional_sentence_split(translated, source_paragraphs)
+
+
+def _proportional_sentence_split(translated, source_paragraphs):
+    """
+    Split translated text into N chunks, snapping boundaries to sentence ends
+    based on source-paragraph character proportions. A robust free alignment
+    when the translator strips newlines.
+    """
+    sentences = [s.strip() for s in _TARGET_SENTENCE_RE.split(translated.strip()) if s.strip()]
+    n = len(source_paragraphs)
+    if len(sentences) < n:
+        return None
+
+    total_src = sum(len(p) for p in source_paragraphs) or 1
+    cum_src = []
+    running = 0
+    for p in source_paragraphs:
+        running += len(p)
+        cum_src.append(running / total_src)
+
+    total_tgt = sum(len(s) for s in sentences) or 1
+    cum_tgt = []
+    running = 0
+    for s in sentences:
+        running += len(s)
+        cum_tgt.append(running / total_tgt)
+
+    chunks = []
+    prev_boundary = -1
+    for target_ratio in cum_src[:-1]:
+        search_start = prev_boundary + 1
+        # Pick the sentence index whose cumulative ratio is closest to the
+        # target, but never go backwards and always leave sentences for the
+        # remaining paragraphs.
+        best_idx = search_start
+        best_diff = abs(cum_tgt[best_idx] - target_ratio)
+        max_idx = len(sentences) - (n - len(chunks))  # reserve one per remaining para
+        for i in range(search_start, max_idx + 1):
+            diff = abs(cum_tgt[i] - target_ratio)
+            if diff < best_diff:
+                best_diff = diff
+                best_idx = i
+        chunk = " ".join(sentences[prev_boundary + 1 : best_idx + 1])
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        prev_boundary = best_idx
+
+    last_chunk = " ".join(sentences[prev_boundary + 1 :])
+    if not last_chunk:
+        return None
+    chunks.append(last_chunk)
+    return chunks
+
+
+# ── Line-level alignment ────────────────────────────────────────────────
+# Proportional splitting of a paragraph translation across lines breaks down
+# when source and target languages reorder words (e.g. "you want to speak"
+# → "quieres hablar" places the verb at the end). We instead:
+#   1. Translate each source line individually — low-quality but gives us a
+#      "semantic fingerprint" of what words belong to that line.
+#   2. Align the full paragraph translation to those fingerprints via DP,
+#      maximising word-overlap between each span and its anchor fingerprint.
+# The displayed text still comes from the high-quality paragraph translation;
+# the anchors are only used to decide where to cut it.
+
+_WORD_RE = re.compile(r"[^\w']+", re.UNICODE)
+
+
+def _tokenize(text):
+    if not text:
+        return []
+    return [tok for tok in _WORD_RE.split(text.lower()) if tok]
+
+
+def align_lines_to_paragraph(paragraph_translation, line_anchors):
+    """
+    Partition paragraph_translation into contiguous word spans, one per line,
+    maximising word-overlap between each span and its anchor fingerprint.
+
+    paragraph_translation: str — the quality translation of the paragraph.
+    line_anchors: list of str — solo translation of each source line (can be
+                                 rough; used only as a content fingerprint).
+
+    Returns: list of str of length len(line_anchors). Each string is a slice
+    of paragraph_translation. Falls back to word-count proportion if the
+    paragraph is empty or anchors are entirely unhelpful.
+    """
+    n = len(line_anchors)
+    if n == 0:
+        return []
+    if not paragraph_translation or not paragraph_translation.strip():
+        return [""] * n
+    if n == 1:
+        return [paragraph_translation.strip()]
+
+    words = paragraph_translation.split()
+    m = len(words)
+    if m < n:
+        # Fewer paragraph words than lines — can't give each line its own word.
+        # Fall back to proportional split so we at least return n chunks.
+        return _proportional_word_split(paragraph_translation, line_anchors)
+
+    word_tokens = [_tokenize(w) for w in words]  # per-word lowercased tokens
+    anchor_sets = [set(_tokenize(a)) for a in line_anchors]
+
+    # dp[j][i] = best score using first i words to cover first j lines.
+    # Each line must receive at least one word, so i >= j.
+    NEG_INF = float("-inf")
+    dp = [[NEG_INF] * (m + 1) for _ in range(n + 1)]
+    back = [[0] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = 0.0
+
+    for j in range(1, n + 1):
+        anchor = anchor_sets[j - 1]
+        # Leave room for remaining lines to each get at least one word.
+        min_i = j
+        max_i = m - (n - j)
+        for i in range(min_i, max_i + 1):
+            best_score = NEG_INF
+            best_k = j - 1
+            # Previous boundary k: span for line j is words[k:i].
+            for k in range(j - 1, i):
+                if dp[j - 1][k] == NEG_INF:
+                    continue
+                # Count anchor tokens that appear in this span.
+                span_tokens = set()
+                for w in range(k, i):
+                    span_tokens.update(word_tokens[w])
+                overlap = len(span_tokens & anchor) if anchor else 0
+                # Normalise by anchor size so long anchors don't dominate,
+                # and add a tiny prior that discourages pathological 1-word
+                # assignments when anchors give no signal.
+                if anchor:
+                    score_term = overlap / max(len(anchor), 1)
+                else:
+                    # Anchor empty — prefer proportional share of remaining
+                    # words, so lines aren't starved.
+                    share = (i - k) / max(m, 1)
+                    score_term = share * 0.1  # tiny, only a tiebreaker
+                total = dp[j - 1][k] + score_term
+                if total > best_score:
+                    best_score = total
+                    best_k = k
+            dp[j][i] = best_score
+            back[j][i] = best_k
+
+    # Recover split points.
+    splits = [m]
+    j = n
+    i = m
+    while j > 0:
+        k = back[j][i]
+        splits.append(k)
+        i = k
+        j -= 1
+    splits.reverse()  # [0, s_1, s_2, ..., s_{n-1}, m]
+
+    chunks = []
+    for j in range(n):
+        chunks.append(" ".join(words[splits[j] : splits[j + 1]]).strip())
+    return chunks
+
+
+def _proportional_word_split(paragraph_translation, line_anchors):
+    """Fallback: divide paragraph words across lines by count (no semantics)."""
+    words = paragraph_translation.split()
+    n = len(line_anchors)
+    if n == 0 or not words:
+        return [""] * n
+    base = len(words) // n
+    extra = len(words) % n
+    chunks = []
+    idx = 0
+    for j in range(n):
+        size = base + (1 if j < extra else 0)
+        size = max(1, size)
+        chunks.append(" ".join(words[idx : idx + size]))
+        idx += size
+    return chunks
+
+
+def _translate_line_anchors(lines_flat, target_lang, source_lang, max_workers=8):
+    """
+    Translate a flat list of source lines individually, in parallel.
+    Returns a list of the same length; empty strings map to empty translations.
+    Failures fall back to the source line so alignment still gets *some*
+    signal (and display won't break).
+    """
+    if not lines_flat:
+        return []
+
+    def _one(text):
+        clean = (text or "").replace("\n", " ").strip()
+        if not clean:
+            return ""
+        try:
+            translator = GoogleTranslator(source=source_lang, target=target_lang)
+            return (translator.translate(clean) or clean).strip()
+        except Exception as exc:
+            print(f"Line anchor translate failed: {exc}")
+            return clean
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        return list(pool.map(_one, lines_flat))
+
+
+def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source_lang='auto'):
+    """
+    Translate paragraphs (with full cross-paragraph context) AND produce
+    per-line aligned chunks via anchor DP alignment.
+
+    Returns (translated_paragraphs, translated_lines_by_paragraph).
+    """
+    translated_paragraphs = translate_paragraphs(paragraphs, target_lang, source_lang)
+
+    # Flatten lines for parallel anchor translation.
+    flat_lines = []
+    offsets = []  # cumulative index where each paragraph's lines start
+    for group in lines_by_paragraph:
+        offsets.append(len(flat_lines))
+        flat_lines.extend(group or [])
+    offsets.append(len(flat_lines))
+
+    flat_anchors = _translate_line_anchors(flat_lines, target_lang, source_lang)
+
+    translated_lines = []
+    for p_idx, group in enumerate(lines_by_paragraph):
+        start, end = offsets[p_idx], offsets[p_idx + 1]
+        anchors = flat_anchors[start:end]
+        paragraph_text = translated_paragraphs[p_idx] if p_idx < len(translated_paragraphs) else ""
+        translated_lines.append(align_lines_to_paragraph(paragraph_text, anchors))
+    return translated_paragraphs, translated_lines
+
 
 @app.route('/api/transcript', methods=['POST'])
 def get_transcript():
@@ -358,18 +731,18 @@ def get_transcript():
 
         if not video_url:
             return jsonify({"error": "URL is required"}), 400
-        
+
         video_id = extract_video_id(video_url)
-        
-        # Call the cached function instead of hitting the network every time
-        cleaned_snippets = get_cached_processed_snippets(video_id, from_lang)
-        
+
+        snippets, paragraphs = get_cached_processed_snippets(video_id, from_lang)
+
         return jsonify({
             "video_id": video_id,
-            "snippets": cleaned_snippets,
-            "from_lang": from_lang
+            "snippets": snippets,
+            "paragraphs": paragraphs,
+            "from_lang": from_lang,
         })
-        
+
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
@@ -379,31 +752,48 @@ def get_transcript():
 def translate_text():
     try:
         data = request.get_json()
-        snippets = data.get('snippets')
+        paragraphs = data.get('paragraphs')
+        lines_by_paragraph = data.get('lines')  # optional nested list, per paragraph
         from_lang = data.get('from_lang', 'en')
         to_lang = data.get('to_lang', 'es')
-        if not snippets:
-            return jsonify({"error": "Snippets are required"}), 400
-        
-        cache_key = generate_cache_key(from_lang, to_lang, snippets)
+        if not paragraphs or not isinstance(paragraphs, list):
+            return jsonify({"error": "paragraphs (list of strings) is required"}), 400
+
+        want_alignment = isinstance(lines_by_paragraph, list) and len(lines_by_paragraph) == len(paragraphs)
+
+        cache_key = generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph if want_alignment else None)
         cached = None
         if redis_client:
             try:
                 cached = redis_client.get(cache_key)
             except Exception as e:
                 print(f"Redis get error: {e}. Proceeding without cache.")
-        
-        if cached:
-            return jsonify({"translated_snippets": json.loads(cached), "cache_hit": True})
 
-        translated_snippets = translate_with_context(snippets, to_lang, from_lang)
+        if cached:
+            payload = json.loads(cached)
+            payload["cache_hit"] = True
+            return jsonify(payload)
+
+        if want_alignment:
+            translated_paragraphs, translated_lines = translate_with_alignment(
+                paragraphs, lines_by_paragraph, to_lang, from_lang
+            )
+            payload = {
+                "translated_paragraphs": translated_paragraphs,
+                "translated_lines": translated_lines,
+            }
+        else:
+            translated_paragraphs = translate_paragraphs(paragraphs, to_lang, from_lang)
+            payload = {"translated_paragraphs": translated_paragraphs}
+
         if redis_client:
             try:
-                redis_client.setex(cache_key, REDIS_TTL_SECONDS, json.dumps(translated_snippets, ensure_ascii=False))
+                redis_client.setex(cache_key, REDIS_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
             except Exception as e:
                 print(f"Redis setex error: {e}. Continuing without cache.")
 
-        return jsonify({"translated_snippets": translated_snippets, "cache_hit": False})
+        payload["cache_hit"] = False
+        return jsonify(payload)
 
     except Exception as e:
         print(f"Translate Error: {e}")
