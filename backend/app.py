@@ -390,80 +390,58 @@ def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
 
 
 _PARAGRAPH_SEPARATOR = "\n\n"
-_TRANSLATE_BATCH_CHAR_LIMIT = 4500  # safety margin under Google Translate's 5000
 _TARGET_SENTENCE_RE = re.compile(r'(?<=[.!?…])\s+')
 
 
 def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
     """
-    Translate all paragraphs in one (or few) calls for maximum cross-paragraph
-    context, then recover per-paragraph chunks. This preserves pronoun
-    resolution, consistent terminology, and register across the whole
-    transcript — things that paragraph-by-paragraph translation loses.
+    Translate all paragraphs in ONE call for maximum cross-paragraph context.
+    This preserves pronoun resolution, consistent terminology, and register
+    across the entire transcript — things that paragraph-by-paragraph or
+    batched translation loses.
 
     Recovery cascade:
       1. Newline split — Google Translate usually preserves paragraph breaks.
       2. Sentence-boundary proportional alignment — for languages/inputs where
          newlines get mangled, map source-paragraph char ratios onto sentences
          in the translated text.
-      3. Per-paragraph translate — last-resort fallback, same as the old
-         behaviour. Keeps us correct even if the batched call fails entirely.
+      3. Per-paragraph translate fallback — if full-text translation fails,
+         translate each paragraph alone (degrades context but stays correct).
     """
     if not paragraphs:
         return []
 
     translator = GoogleTranslator(source=source_lang, target=target_lang)
     result = ["" for _ in paragraphs]
-    non_empty = [(i, (p or "").replace("\n", " ").strip()) for i, p in enumerate(paragraphs)]
-    non_empty = [(i, t) for i, t in non_empty if t]
-    if not non_empty:
+    non_empty_indices = [i for i, p in enumerate(paragraphs) if (p or "").strip()]
+    if not non_empty_indices:
         return result
 
-    for batch in _batch_paragraphs(non_empty, _TRANSLATE_BATCH_CHAR_LIMIT):
-        _translate_batch_into(result, batch, translator)
-    return result
+    # Join ALL paragraphs into one text with \n\n separators for maximum context.
+    clean_paras = [(p or "").replace("\n", " ").strip() for p in paragraphs]
+    joined = _PARAGRAPH_SEPARATOR.join(clean_paras)
 
-
-def _batch_paragraphs(indexed, char_limit):
-    """Split (index, text) pairs into batches that fit within char_limit."""
-    batches = []
-    current = []
-    current_len = 0
-    sep_len = len(_PARAGRAPH_SEPARATOR)
-    for idx, text in indexed:
-        added = len(text) + (sep_len if current else 0)
-        if current and current_len + added > char_limit:
-            batches.append(current)
-            current = []
-            current_len = 0
-            added = len(text)
-        current.append((idx, text))
-        current_len += added
-    if current:
-        batches.append(current)
-    return batches
-
-
-def _translate_batch_into(result, batch, translator):
-    """Translate one batch as a single call and write chunks into result."""
-    joined = _PARAGRAPH_SEPARATOR.join(text for _, text in batch)
     translated = None
     try:
         translated = translator.translate(joined) or ""
     except Exception as exc:
-        print(f"Batch translate failed: {exc}; falling back per-paragraph")
+        print(f"Full-text translate failed: {exc}; falling back per-paragraph")
 
-    chunks = _recover_chunks(translated, [t for _, t in batch]) if translated else None
+    chunks = _recover_chunks(translated, clean_paras) if translated else None
     if chunks is None:
-        for idx, text in batch:
+        # Fallback: translate each paragraph alone.
+        for idx in non_empty_indices:
             try:
-                result[idx] = (translator.translate(text) or text).strip()
+                result[idx] = (translator.translate(clean_paras[idx]) or clean_paras[idx]).strip()
             except Exception as exc:
-                print(f"Per-paragraph fallback failed: {exc}")
-                result[idx] = text
-        return
-    for (idx, _), chunk in zip(batch, chunks):
+                print(f"Per-paragraph fallback failed for para {idx}: {exc}")
+                result[idx] = clean_paras[idx]
+        return result
+
+    # Assign recovered chunks to their positions.
+    for idx, chunk in zip(range(len(paragraphs)), chunks):
         result[idx] = chunk.strip()
+    return result
 
 
 def _recover_chunks(translated, source_paragraphs):
@@ -1281,6 +1259,37 @@ def remove_student(class_id, student_id):
         return jsonify({"message": "Student removed from class"})
     except Exception as e:
         print(f"DELETE /api/classes/{class_id}/students/{student_id} error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Admin Cache Endpoints ────────────────────────────────────────────────
+
+@app.route('/api/admin/clear-translation-cache', methods=['POST'])
+def clear_translation_cache():
+    """
+    Clear all translation cache entries. Requires auth token.
+    Useful after a translation method change (e.g. new full-context algorithm).
+    All videos will re-translate with the new method on next access.
+    """
+    if not g.user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not redis_client:
+        return jsonify({"error": "Redis not configured"}), 503
+
+    try:
+        patterns = ["translate_paragraphs:*", "translate_paragraphs:v2:*"]
+        total_deleted = 0
+        for pattern in patterns:
+            keys = redis_client.keys(pattern)
+            if keys:
+                total_deleted += redis_client.delete(*keys)
+        return jsonify({
+            "message": f"Cleared {total_deleted} translation cache entries",
+            "entries_deleted": total_deleted,
+        })
+    except Exception as e:
+        print(f"Clear cache error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
