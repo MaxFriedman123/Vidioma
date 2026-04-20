@@ -1,6 +1,7 @@
 Flask
 flask-cors
 deep-translator
+translators
 youtube-transcript-api
 redis
 requests[socks]

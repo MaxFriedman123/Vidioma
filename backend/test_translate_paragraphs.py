@@ -86,17 +86,28 @@ class FakeTranslator:
         self.behavior = behavior
         self.fail_batch = fail_batch
 
-    def translate(self, text):
+    def __call__(self, text, target_lang, source_lang="auto"):
         self.calls.append(text)
-        # Simulate a batch that's too long to translate successfully.
         if self.fail_batch and "\n\n" in text:
             raise RuntimeError("simulated batch failure")
         if self.behavior == "uppercase":
             return text.upper()
         if self.behavior == "strip_newlines":
-            # Emulate a translator that loses paragraph breaks entirely.
             return text.replace("\n\n", " ").replace("\n", " ").upper()
         raise ValueError(self.behavior)
+
+
+def _install_fake(fake):
+    """Patch the single translator seam used by translate_paragraphs."""
+    import app
+    original = app._translate_text
+    app._translate_text = fake
+    return original
+
+
+def _restore(original):
+    import app
+    app._translate_text = original
 
 
 class TestTranslateParagraphsOrchestration(unittest.TestCase):
@@ -105,16 +116,11 @@ class TestTranslateParagraphsOrchestration(unittest.TestCase):
 
     def test_skips_empty_paragraphs_preserving_positions(self):
         fake = FakeTranslator()
-        # Monkeypatch GoogleTranslator creation inside translate_paragraphs by
-        # passing a drop-in replacement via the module attribute.
-        import app
-
-        original = app.GoogleTranslator
-        app.GoogleTranslator = lambda source, target: fake
+        original = _install_fake(fake)
         try:
             result = translate_paragraphs(["hello.", "", "world."], "es")
         finally:
-            app.GoogleTranslator = original
+            _restore(original)
 
         self.assertEqual(result[1], "")
         self.assertTrue(result[0])
@@ -122,28 +128,22 @@ class TestTranslateParagraphsOrchestration(unittest.TestCase):
 
     def test_full_text_failure_triggers_per_paragraph_fallback(self):
         fake = FakeTranslator(fail_batch=True)
-        import app
-
-        original = app.GoogleTranslator
-        app.GoogleTranslator = lambda source, target: fake
+        original = _install_fake(fake)
         try:
             result = translate_paragraphs(["one.", "two."], "es")
         finally:
-            app.GoogleTranslator = original
+            _restore(original)
 
         # Each paragraph was translated individually after full-text failed.
         self.assertEqual(result, ["ONE.", "TWO."])
 
     def test_strip_newlines_still_recovers_via_sentence_alignment(self):
         fake = FakeTranslator(behavior="strip_newlines")
-        import app
-
-        original = app.GoogleTranslator
-        app.GoogleTranslator = lambda source, target: fake
+        original = _install_fake(fake)
         try:
             result = translate_paragraphs(["Hello world.", "Goodbye world."], "es")
         finally:
-            app.GoogleTranslator = original
+            _restore(original)
 
         self.assertEqual(len(result), 2)
         self.assertTrue(result[0])
