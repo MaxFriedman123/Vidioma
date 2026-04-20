@@ -386,11 +386,63 @@ def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
         "lines": lines_by_paragraph,  # None ↔ old shape, list ↔ new shape
     }
     key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "translate_paragraphs:v2:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    return "translate_paragraphs:v3:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
 
 
 _PARAGRAPH_SEPARATOR = "\n\n"
 _TARGET_SENTENCE_RE = re.compile(r'(?<=[.!?…])\s+')
+
+_TRANSLATORS_IMPORT_FAILED = False
+
+
+def _bing_translate(text, target_lang, source_lang, attempts=3):
+    """Translate via Bing (through the `translators` package).
+
+    Bing handles elephant 'trunks' → 'trompas' correctly where the free
+    Google endpoint gives 'baúles' (luggage). Returns None on failure so
+    the caller can fall back. Retries transient websocket errors a few times
+    before giving up — the free Bing endpoint intermittently returns
+    "Unexpected frame type".
+    """
+    global _TRANSLATORS_IMPORT_FAILED
+    if _TRANSLATORS_IMPORT_FAILED:
+        return None
+    if not (text or "").strip():
+        return ""
+    try:
+        import translators as ts
+    except Exception as exc:
+        print(f"translators import failed: {exc}; Bing disabled for this process")
+        _TRANSLATORS_IMPORT_FAILED = True
+        return None
+    src = "auto" if (source_lang or "auto") == "auto" else source_lang
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            return ts.translate_text(
+                text,
+                translator="bing",
+                from_language=src,
+                to_language=target_lang,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt + 1 < attempts:
+                import time
+                time.sleep(0.4 * (attempt + 1))
+    print(f"Bing translate failed after {attempts} attempts ({last_exc}); falling back to Google")
+    return None
+
+
+def _translate_text(text, target_lang, source_lang="auto"):
+    """Translate `text` using Bing first, then Google as fallback."""
+    if not (text or "").strip():
+        return ""
+    bing = _bing_translate(text, target_lang, source_lang)
+    if bing:
+        return bing
+    translator = GoogleTranslator(source=source_lang, target=target_lang)
+    return translator.translate(text) or ""
 
 
 def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
@@ -411,7 +463,6 @@ def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
     if not paragraphs:
         return []
 
-    translator = GoogleTranslator(source=source_lang, target=target_lang)
     result = ["" for _ in paragraphs]
     non_empty_indices = [i for i, p in enumerate(paragraphs) if (p or "").strip()]
     if not non_empty_indices:
@@ -423,7 +474,7 @@ def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
 
     translated = None
     try:
-        translated = translator.translate(joined) or ""
+        translated = _translate_text(joined, target_lang, source_lang) or ""
     except Exception as exc:
         print(f"Full-text translate failed: {exc}; falling back per-paragraph")
 
@@ -432,7 +483,7 @@ def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
         # Fallback: translate each paragraph alone.
         for idx in non_empty_indices:
             try:
-                result[idx] = (translator.translate(clean_paras[idx]) or clean_paras[idx]).strip()
+                result[idx] = (_translate_text(clean_paras[idx], target_lang, source_lang) or clean_paras[idx]).strip()
             except Exception as exc:
                 print(f"Per-paragraph fallback failed for para {idx}: {exc}")
                 result[idx] = clean_paras[idx]
@@ -662,8 +713,7 @@ def _translate_line_anchors(lines_flat, target_lang, source_lang, max_workers=8)
         if not clean:
             return ""
         try:
-            translator = GoogleTranslator(source=source_lang, target=target_lang)
-            return (translator.translate(clean) or clean).strip()
+            return (_translate_text(clean, target_lang, source_lang) or clean).strip()
         except Exception as exc:
             print(f"Line anchor translate failed: {exc}")
             return clean
@@ -1279,7 +1329,7 @@ def clear_translation_cache():
         return jsonify({"error": "Redis not configured"}), 503
 
     try:
-        patterns = ["translate_paragraphs:*", "translate_paragraphs:v2:*"]
+        patterns = ["translate_paragraphs:*", "translate_paragraphs:v3:*"]
         total_deleted = 0
         for pattern in patterns:
             keys = redis_client.keys(pattern)
