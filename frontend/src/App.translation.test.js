@@ -151,7 +151,8 @@ describe('Dashboard resume request isolation', () => {
         if (payload.url.includes('BBBBBBBBBBB')) {
           return Promise.resolve({
             data: {
-              snippets: [{ source: 'Bravo line', start: 0, duration: 2 }],
+              snippets: [{ source: 'Bravo line', start: 0, duration: 2, paragraph: 0 }],
+              paragraphs: ['Bravo line'],
             },
           });
         }
@@ -160,7 +161,7 @@ describe('Dashboard resume request isolation', () => {
       if (url.includes('/api/translate')) {
         return Promise.resolve({
           data: {
-            translated_snippets: [{ source: 'Bravo traduit', start: 0, duration: 2 }],
+            translated_paragraphs: ['Bravo traduit'],
           },
         });
       }
@@ -189,7 +190,8 @@ describe('Dashboard resume request isolation', () => {
     await act(async () => {
       alphaTranscript.resolve({
         data: {
-          snippets: [{ source: 'Alpha line', start: 0, duration: 2 }],
+          snippets: [{ source: 'Alpha line', start: 0, duration: 2, paragraph: 0 }],
+          paragraphs: ['Alpha line'],
         },
       });
       await Promise.resolve();
@@ -209,7 +211,8 @@ describe('Dashboard resume request isolation', () => {
         if (payload.url.includes('AAAAAAAAAAA')) {
           return Promise.resolve({
             data: {
-              snippets: [{ source: 'Alpha line', start: 0, duration: 2 }],
+              snippets: [{ source: 'Alpha line', start: 0, duration: 2, paragraph: 0 }],
+              paragraphs: ['Alpha line'],
             },
           });
         }
@@ -217,19 +220,20 @@ describe('Dashboard resume request isolation', () => {
         if (payload.url.includes('BBBBBBBBBBB')) {
           return Promise.resolve({
             data: {
-              snippets: [{ source: 'Bravo line', start: 0, duration: 2 }],
+              snippets: [{ source: 'Bravo line', start: 0, duration: 2, paragraph: 0 }],
+              paragraphs: ['Bravo line'],
             },
           });
         }
       }
 
       if (url.includes('/api/translate')) {
-        const firstSnippet = payload.snippets[0]?.source;
-        if (firstSnippet === 'Alpha line') {
+        const firstParagraph = payload.paragraphs?.[0];
+        if (firstParagraph === 'Alpha line') {
           return alphaTranslation.promise;
         }
 
-        if (firstSnippet === 'Bravo line') {
+        if (firstParagraph === 'Bravo line') {
           return bravoTranslation.promise;
         }
       }
@@ -245,7 +249,7 @@ describe('Dashboard resume request isolation', () => {
         axios.post.mock.calls.some(
           ([requestUrl, body]) =>
             requestUrl.includes('/api/translate') &&
-            body.snippets[0]?.source === 'Alpha line' &&
+            body.paragraphs?.[0] === 'Alpha line' &&
             body.to_lang === 'es'
         )
       ).toBe(true);
@@ -267,7 +271,7 @@ describe('Dashboard resume request isolation', () => {
         axios.post.mock.calls.some(
           ([requestUrl, body]) =>
             requestUrl.includes('/api/translate') &&
-            body.snippets[0]?.source === 'Bravo line' &&
+            body.paragraphs?.[0] === 'Bravo line' &&
             body.to_lang === 'fr'
         )
       ).toBe(true);
@@ -276,7 +280,7 @@ describe('Dashboard resume request isolation', () => {
     await act(async () => {
       alphaTranslation.resolve({
         data: {
-          translated_snippets: [{ source: 'Linea alfa', start: 0, duration: 2 }],
+          translated_paragraphs: ['Linea alfa'],
         },
       });
       await Promise.resolve();
@@ -288,7 +292,7 @@ describe('Dashboard resume request isolation', () => {
     await act(async () => {
       bravoTranslation.resolve({
         data: {
-          translated_snippets: [{ source: 'Bravo traduit', start: 0, duration: 2 }],
+          translated_paragraphs: ['Bravo traduit'],
         },
       });
       await Promise.resolve();

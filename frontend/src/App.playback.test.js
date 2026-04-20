@@ -71,9 +71,12 @@ import { AuthProvider } from './AuthContext';
 const axios = require('axios');
 
 const snippets = [
-  { source: 'hello', start: 0, duration: 2 },
-  { source: 'world', start: 5, duration: 2 },
+  { source: 'hello', start: 0, duration: 2, paragraph: 0 },
+  { source: 'world', start: 5, duration: 2, paragraph: 0 },
 ];
+
+const paragraphs = ['hello world'];
+const translatedParagraphs = ['hola mundo'];
 
 function renderApp() {
   return render(
@@ -105,10 +108,10 @@ function setUpAuthSession(accessToken = 'dashboard-token') {
 function mockVideoApis() {
   axios.post.mockImplementation((url) => {
     if (url.includes('/api/transcript')) {
-      return Promise.resolve({ data: { snippets } });
+      return Promise.resolve({ data: { snippets, paragraphs } });
     }
     if (url.includes('/api/translate')) {
-      return Promise.resolve({ data: { translated_snippets: snippets.map(({ source }) => ({ source: `${source}-translated` })) } });
+      return Promise.resolve({ data: { translated_paragraphs: translatedParagraphs } });
     }
     return Promise.resolve({ data: {} });
   });
