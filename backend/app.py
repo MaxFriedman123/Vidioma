@@ -451,21 +451,27 @@ def _bing_translate(text, target_lang, source_lang, attempts=3):
     return result
 
 
-def _translate_text(text, target_lang, source_lang="auto"):
-    """Quality-first cascade: Bing → Alibaba → Google.
+_QUALITY_FALLBACK_ENGINES = ("alibaba", "caiyun", "sogou", "iciba", "youdao", "reverso")
 
-    Bing is best but rate-limits Render's IP; Alibaba is a decent free fallback
-    that doesn't return 'baúles' for elephant trunks; Google is the final safety
-    net (worst quality for context-sensitive words).
+
+def _translate_text(text, target_lang, source_lang="auto"):
+    """Quality-first cascade: Bing → multiple free engines → Google.
+
+    Bing is best but rate-limits Render's IP. Google gives 'baúles' for
+    elephant trunks. Everything between is "better than Google" on
+    context-sensitive words. We try several in order and take the first that
+    succeeds; only fall back to Google if ALL quality engines fail.
     """
     if not (text or "").strip():
         return ""
     bing = _bing_translate(text, target_lang, source_lang)
     if bing:
         return bing
-    alibaba = _ts_translate("alibaba", text, target_lang, source_lang)
-    if alibaba and not isinstance(alibaba, Exception):
-        return alibaba
+    for engine in _QUALITY_FALLBACK_ENGINES:
+        result = _ts_translate(engine, text, target_lang, source_lang, attempts=2)
+        if result and not isinstance(result, Exception):
+            return result
+    print("All quality engines failed; falling back to Google (may produce lower-quality output)")
     translator = GoogleTranslator(source=source_lang, target=target_lang)
     return translator.translate(text) or ""
 
