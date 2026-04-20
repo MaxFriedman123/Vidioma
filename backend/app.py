@@ -25,6 +25,13 @@ CORS(app)
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 REDIS_TTL_SECONDS = int(os.environ.get("REDIS_TTL_SECONDS", "86400"))
 
+DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "").strip()
+DEEPL_API_URL = (
+    "https://api-free.deepl.com/v2/translate"
+    if DEEPL_API_KEY.endswith(":fx")
+    else "https://api.deepl.com/v2/translate"
+)
+
 # ── Supabase Configuration ──────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")   # service role key (bypasses RLS)
@@ -386,7 +393,7 @@ def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
         "lines": lines_by_paragraph,  # None ↔ old shape, list ↔ new shape
     }
     key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "translate_paragraphs:v4:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    return "translate_paragraphs:v5:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
 
 
 _PARAGRAPH_SEPARATOR = "\n\n"
@@ -395,6 +402,53 @@ _TARGET_SENTENCE_RE = re.compile(r'(?<=[.!?…])\s+')
 _TRANSLATORS_IMPORT_FAILED = False
 _BING_COOLDOWN_UNTIL = 0.0  # epoch seconds — skip Bing while rate-limited
 _BING_COOLDOWN_SECONDS = 120
+_DEEPL_COOLDOWN_UNTIL = 0.0  # cooldown when monthly quota is exhausted
+_DEEPL_COOLDOWN_SECONDS = 3600
+
+
+def _deepl_translate(text, target_lang, source_lang="auto"):
+    """Translate via DeepL — highest quality, official API, no scraping.
+
+    Uses the free tier (500K chars/month) when the key ends with ':fx'.
+    Returns None on any failure so the caller can fall back.
+    """
+    global _DEEPL_COOLDOWN_UNTIL
+    import time
+    if not DEEPL_API_KEY:
+        return None
+    if time.time() < _DEEPL_COOLDOWN_UNTIL:
+        return None
+    if not (text or "").strip():
+        return ""
+    data = {
+        "text": text,
+        "target_lang": target_lang.upper(),
+    }
+    if source_lang and source_lang != "auto":
+        data["source_lang"] = source_lang.upper()
+    try:
+        resp = http_requests.post(
+            DEEPL_API_URL,
+            headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
+            data=data,
+            timeout=30,
+        )
+        if resp.status_code == 456:
+            _DEEPL_COOLDOWN_UNTIL = time.time() + _DEEPL_COOLDOWN_SECONDS
+            print(f"DeepL quota exhausted (456); cooling down for {_DEEPL_COOLDOWN_SECONDS}s")
+            return None
+        if resp.status_code == 429:
+            _DEEPL_COOLDOWN_UNTIL = time.time() + 60
+            print("DeepL rate-limited (429); 60s cooldown")
+            return None
+        resp.raise_for_status()
+        translations = (resp.json() or {}).get("translations") or []
+        if not translations:
+            return None
+        return translations[0].get("text") or None
+    except Exception as exc:
+        print(f"DeepL translate failed ({exc}); falling back")
+        return None
 
 
 def _ts_translate(engine, text, target_lang, source_lang, attempts=1):
@@ -455,15 +509,19 @@ _QUALITY_FALLBACK_ENGINES = ("alibaba", "caiyun", "sogou", "iciba", "youdao", "r
 
 
 def _translate_text(text, target_lang, source_lang="auto"):
-    """Quality-first cascade: Bing → multiple free engines → Google.
+    """Quality-first cascade: DeepL → Bing → multiple free engines → Google.
 
-    Bing is best but rate-limits Render's IP. Google gives 'baúles' for
-    elephant trunks. Everything between is "better than Google" on
-    context-sensitive words. We try several in order and take the first that
-    succeeds; only fall back to Google if ALL quality engines fail.
+    DeepL is the highest-quality translator available and uses an official API
+    (no scraping / rate-limit surprises) within the 500K chars/month free tier.
+    Bing is the best free-scraped option but rate-limits Render's IP. The free
+    engines after Bing all return better-than-Google output on context-sensitive
+    words; Google is the absolute last resort (gives 'baúles' for elephant trunks).
     """
     if not (text or "").strip():
         return ""
+    deepl = _deepl_translate(text, target_lang, source_lang)
+    if deepl:
+        return deepl
     bing = _bing_translate(text, target_lang, source_lang)
     if bing:
         return bing
@@ -1364,7 +1422,7 @@ def clear_translation_cache():
         return jsonify({"error": "Redis not configured"}), 503
 
     try:
-        patterns = ["translate_paragraphs:*", "translate_paragraphs:v4:*"]
+        patterns = ["translate_paragraphs:*", "translate_paragraphs:v5:*"]
         total_deleted = 0
         for pattern in patterns:
             keys = redis_client.keys(pattern)
