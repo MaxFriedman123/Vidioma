@@ -222,5 +222,137 @@ class TestAlignLinesToParagraph(unittest.TestCase):
         self.assertTrue(chunks[1])
 
 
+class TestNoSpaceScriptSplitting(unittest.TestCase):
+    """CJK/Thai fallback must not blank lines (the old .split() collapse bug)."""
+
+    def test_detects_cjk(self):
+        import app
+        self.assertTrue(app._is_no_space_script("我想学中文因为它很有趣"))
+        self.assertTrue(app._is_no_space_script("日本語のテキストです"))
+        self.assertFalse(app._is_no_space_script("Hola mundo esto es"))
+        self.assertFalse(app._is_no_space_script("한국어 텍스트"))  # Korean uses spaces
+
+    def test_cjk_align_fills_all_lines(self):
+        import app
+        para = "我想学中文因为它很有趣而且我喜欢中国文化"
+        chunks = app.align_lines_to_paragraph(para, ["我想学中文", "因为它很有趣", "而且我喜欢中国文化"])
+        self.assertEqual(len(chunks), 3)
+        for c in chunks:
+            self.assertTrue(c.strip(), f"CJK line was blank: {chunks!r}")
+        # No characters lost or added.
+        self.assertEqual("".join(chunks).replace(" ", ""), para)
+
+    def test_cjk_proportional_is_even(self):
+        import app
+        para = "一二三四五六七八九"  # 9 chars
+        chunks = app._proportional_word_split(para, ["", "", ""])
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual([len(c) for c in chunks], [3, 3, 3])
+
+    def test_spaced_language_unaffected(self):
+        import app
+        chunks = app.align_lines_to_paragraph(
+            "Hola a todos bienvenidos al video de hoy",
+            ["Hola a todos", "bienvenidos al video", "de hoy"],
+        )
+        self.assertEqual(len(chunks), 3)
+        # Words should not be split mid-token; join with space reproduces content.
+        self.assertEqual(" ".join(chunks).split(), "Hola a todos bienvenidos al video de hoy".split())
+
+
+class TestDeeplStructuredLines(unittest.TestCase):
+    """DeepL per-line structured translation (mocked network)."""
+
+    def _with_deepl(self, mock_request):
+        import app
+        app.DEEPL_API_KEY = "test:fx"
+        app._DEEPL_COOLDOWN_UNTIL = 0.0
+        original = app._deepl_request
+        app._deepl_request = mock_request
+        return original
+
+    def _restore(self, original):
+        import app
+        app._deepl_request = original
+        app.DEEPL_API_KEY = ""
+
+    def test_xml_happy_path_is_one_to_one(self):
+        import app, re
+
+        def mock(texts, target_lang, source_lang="auto", extra_params=None):
+            if (extra_params or {}).get("tag_handling") == "xml":
+                return [re.sub(r"<ln>(.*?)</ln>", lambda m: f"<ln>T:{m.group(1)}</ln>", texts[0])]
+            return None
+
+        original = self._with_deepl(mock)
+        try:
+            out = app._deepl_translate_lines(["one", "two", "three"], "es", "en")
+        finally:
+            self._restore(original)
+        self.assertEqual(out, ["T:one", "T:two", "T:three"])
+
+    def test_empty_lines_reinserted_at_correct_index(self):
+        import app, re
+
+        def mock(texts, target_lang, source_lang="auto", extra_params=None):
+            if (extra_params or {}).get("tag_handling") == "xml":
+                return [re.sub(r"<ln>(.*?)</ln>", lambda m: f"<ln>T:{m.group(1)}</ln>", texts[0])]
+            return None
+
+        original = self._with_deepl(mock)
+        try:
+            out = app._deepl_translate_lines(["hi", "  ", "bye"], "es", "en")
+        finally:
+            self._restore(original)
+        self.assertEqual(out, ["T:hi", "", "T:bye"])
+
+    def test_xml_bad_count_falls_back_to_array(self):
+        import app
+
+        def mock(texts, target_lang, source_lang="auto", extra_params=None):
+            if (extra_params or {}).get("tag_handling") == "xml":
+                return ["<ln>only-one</ln>"]  # wrong count -> triggers array mode
+            # array mode: one output per input
+            return [f"A:{t}" for t in texts]
+
+        original = self._with_deepl(mock)
+        try:
+            out = app._deepl_translate_lines(["a", "b", "c"], "es", "en")
+        finally:
+            self._restore(original)
+        self.assertEqual(out, ["A:a", "A:b", "A:c"])
+
+    def test_returns_none_when_deepl_unavailable(self):
+        import app
+
+        def mock(texts, target_lang, source_lang="auto", extra_params=None):
+            return None
+
+        original = self._with_deepl(mock)
+        try:
+            out = app._deepl_translate_lines(["a", "b"], "es", "en")
+        finally:
+            self._restore(original)
+        self.assertIsNone(out)
+
+    def test_orchestrator_paragraph_equals_join_of_lines(self):
+        import app, re
+
+        def mock(texts, target_lang, source_lang="auto", extra_params=None):
+            if (extra_params or {}).get("tag_handling") == "xml":
+                return [re.sub(r"<ln>(.*?)</ln>", lambda m: f"[{m.group(1)}]", texts[0])]
+            return None
+
+        original = self._with_deepl(mock)
+        try:
+            tp, tl = app.translate_with_alignment(
+                ["one two three"], [["one", "two", "three"]], "es", "en"
+            )
+        finally:
+            self._restore(original)
+        self.assertEqual(len(tl[0]), 3)
+        self.assertEqual(tp[0], " ".join(tl[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

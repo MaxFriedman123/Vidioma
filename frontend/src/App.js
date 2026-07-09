@@ -130,18 +130,37 @@ const getSimilarity = (str1, str2) => {
 // to each source line's word count within the paragraph. Translation accuracy
 // still comes from the whole-paragraph translation — this split is just so the
 // user can see prev/current/next translated chunks alongside the source scroll.
+// Scripts without spaces between words (CJK + Thai). For these, splitting on
+// whitespace yields ~1 token for the whole paragraph, which would dump the
+// entire translation onto one line and blank the rest. Segment by character
+// instead so the proportional split can distribute across all lines.
+const NO_SPACE_SCRIPT_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ฀-๿]/g;
+const isNoSpaceScript = (text) => {
+  if (!text) return false;
+  const cjk = (text.match(NO_SPACE_SCRIPT_RE) || []).length;
+  const nonSpace = (text.match(/\S/g) || []).length;
+  return nonSpace > 0 && cjk / nonSpace >= 0.3;
+};
+const segmentUnits = (text) => {
+  if (!text) return [];
+  if (isNoSpaceScript(text)) return Array.from(text).filter((ch) => !/\s/.test(ch));
+  return text.trim().split(/\s+/).filter(Boolean);
+};
+
 const splitParagraphToLines = (paragraphText, sourceLineTexts) => {
   const n = sourceLineTexts.length;
   if (n === 0) return [];
   if (!paragraphText) return sourceLineTexts.map(() => '');
   if (n === 1) return [paragraphText.trim()];
 
-  const targetWords = paragraphText.trim().split(/\s+/).filter(Boolean);
+  const noSpace = isNoSpaceScript(paragraphText);
+  const joiner = noSpace ? '' : ' ';
+  const targetWords = segmentUnits(paragraphText);
   const totalTargetWords = targetWords.length;
   if (totalTargetWords === 0) return sourceLineTexts.map(() => '');
 
   const sourceWordCounts = sourceLineTexts.map(
-    (s) => (s || '').trim().split(/\s+/).filter(Boolean).length || 1
+    (s) => segmentUnits(s || '').length || 1
   );
   const totalSourceWords = sourceWordCounts.reduce((a, b) => a + b, 0);
 
@@ -155,12 +174,12 @@ const splitParagraphToLines = (paragraphText, sourceLineTexts) => {
       const share = sourceWordCounts[i] / totalSourceWords;
       const remaining = totalTargetWords - consumed;
       const linesLeft = n - i;
-      // Round proportional share, but guarantee at least 1 word for each
+      // Round proportional share, but guarantee at least 1 unit for each
       // remaining line (so later chunks aren't starved).
       size = Math.max(1, Math.round(share * totalTargetWords));
       size = Math.min(size, remaining - (linesLeft - 1));
     }
-    chunks.push(targetWords.slice(consumed, consumed + size).join(' '));
+    chunks.push(targetWords.slice(consumed, consumed + size).join(joiner));
     consumed += size;
   }
   return chunks;

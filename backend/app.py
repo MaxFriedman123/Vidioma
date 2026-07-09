@@ -433,7 +433,10 @@ def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
         "lines": lines_by_paragraph,  # None ↔ old shape, list ↔ new shape
     }
     key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "translate_paragraphs:v5:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    # v6: per-line translation now comes from DeepL structured output (exact
+    # 1:1 line alignment) rather than blob-split-by-anchor-DP, so old cached
+    # results have different (worse) line boundaries — bump to invalidate them.
+    return "translate_paragraphs:v6:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
 
 
 _PARAGRAPH_SEPARATOR = "\n\n"
@@ -446,11 +449,18 @@ _DEEPL_COOLDOWN_UNTIL = 0.0  # cooldown when monthly quota is exhausted
 _DEEPL_COOLDOWN_SECONDS = 3600
 
 
-def _deepl_translate(text, target_lang, source_lang="auto"):
-    """Translate via DeepL — highest quality, official API, no scraping.
+def _deepl_available():
+    """True when DeepL is configured and not in a cooldown window."""
+    import time
+    return bool(DEEPL_API_KEY) and time.time() >= _DEEPL_COOLDOWN_UNTIL
 
-    Uses the free tier (500K chars/month) when the key ends with ':fx'.
-    Returns None on any failure so the caller can fall back.
+
+def _deepl_request(texts, target_lang, source_lang="auto", extra_params=None):
+    """Low-level DeepL call. `texts` is a list of strings (DeepL translates each
+    as its own element and returns them in the SAME order, 1:1).
+
+    Returns a list of translated strings (same length as `texts`), or None on
+    any failure so callers can fall back. Honors the shared DeepL cooldown.
     """
     global _DEEPL_COOLDOWN_UNTIL
     import time
@@ -458,19 +468,24 @@ def _deepl_translate(text, target_lang, source_lang="auto"):
         return None
     if time.time() < _DEEPL_COOLDOWN_UNTIL:
         return None
-    if not (text or "").strip():
-        return ""
-    data = {
-        "text": text,
-        "target_lang": target_lang.upper(),
-    }
+    if not texts:
+        return []
+
+    # requests encodes a list value as repeated `text=` params, which is exactly
+    # DeepL's multi-text format. Build an explicit tuple list so ordering and the
+    # extra params (context/tag_handling/…) are unambiguous.
+    fields = [("text", t) for t in texts]
+    fields.append(("target_lang", target_lang.upper()))
     if source_lang and source_lang != "auto":
-        data["source_lang"] = source_lang.upper()
+        fields.append(("source_lang", source_lang.upper()))
+    for k, v in (extra_params or {}).items():
+        fields.append((k, v))
+
     try:
         resp = http_requests.post(
             DEEPL_API_URL,
             headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
-            data=data,
+            data=fields,
             timeout=30,
         )
         if resp.status_code == 456:
@@ -483,12 +498,123 @@ def _deepl_translate(text, target_lang, source_lang="auto"):
             return None
         resp.raise_for_status()
         translations = (resp.json() or {}).get("translations") or []
-        if not translations:
+        if len(translations) != len(texts):
+            print(f"DeepL returned {len(translations)} translations for {len(texts)} inputs; falling back")
             return None
-        return translations[0].get("text") or None
+        return [t.get("text", "") for t in translations]
     except Exception as exc:
-        print(f"DeepL translate failed ({exc}); falling back")
+        print(f"DeepL request failed ({exc}); falling back")
         return None
+
+
+def _deepl_translate(text, target_lang, source_lang="auto"):
+    """Translate a single string via DeepL. Returns None on failure, "" for empty
+    input. Thin wrapper over _deepl_request for the paragraph/blob callers.
+    """
+    if not DEEPL_API_KEY:
+        return None
+    if not (text or "").strip():
+        return ""
+    result = _deepl_request([text], target_lang, source_lang)
+    if not result:
+        return None
+    return result[0] or None
+
+
+# ── Structured per-line translation (context-preserving, no re-splitting) ──
+# The old approach translated a paragraph as one blob then tried to CUT it back
+# into per-line pieces. That is lossy: cross-language word reordering means a
+# line's translation is not a contiguous slice, and CJK output has no spaces to
+# cut on. Instead we get per-line output directly FROM DeepL while still giving
+# it the whole paragraph as context, so line-to-line correspondence is exact by
+# construction and translation quality keeps full cross-line context.
+
+_DEEPL_LINE_OPEN = "<ln>"
+_DEEPL_LINE_CLOSE = "</ln>"
+# Matches the translated content of each <ln>…</ln>, tolerating whitespace and
+# any attributes DeepL might add. DOTALL so multi-word/segmented content matches.
+_DEEPL_LINE_RE = re.compile(r"<ln\b[^>]*>(.*?)</ln>", re.DOTALL | re.IGNORECASE)
+
+
+def _xml_escape(text):
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+
+
+def _xml_unescape(text):
+    return (
+        text.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    )
+
+
+def _deepl_translate_lines(lines, target_lang, source_lang="auto"):
+    """Translate a paragraph's subtitle lines into per-line target strings,
+    preserving full paragraph context AND exact 1:1 line correspondence.
+
+    Returns a list of translated strings the SAME length as `lines`, or None on
+    any failure (caller falls back). Empty/whitespace-only lines map to "".
+
+    Two DeepL strategies, tried in order:
+      1) XML tag handling: wrap each line in <ln>…</ln>, translate the WHOLE
+         paragraph as ONE unit (maximum cross-line context / cohesion), then
+         split the response on the tags. Boundaries come straight from DeepL.
+      2) Multi-text array + context: send each line as its own text[] element in
+         ONE request, passing the joined paragraph as the (untranslated) context
+         parameter. DeepL guarantees N outputs for N inputs, in order.
+    """
+    if not _deepl_available():
+        return None
+    if not lines:
+        return []
+
+    # Track which lines are non-empty; empty lines are re-inserted as "" so the
+    # returned list stays index-aligned with the input.
+    idx_map = [i for i, ln in enumerate(lines) if (ln or "").strip()]
+    non_empty = [lines[i].strip() for i in idx_map]
+    if not non_empty:
+        return ["" for _ in lines]
+
+    def _rebuild(translated_non_empty):
+        out = ["" for _ in lines]
+        for slot, val in zip(idx_map, translated_non_empty):
+            out[slot] = (val or "").strip()
+        return out
+
+    # --- Strategy 1: XML tag handling (single context-rich translation unit) ---
+    tagged = "".join(f"{_DEEPL_LINE_OPEN}{_xml_escape(t)}{_DEEPL_LINE_CLOSE}" for t in non_empty)
+    result = _deepl_request(
+        [tagged],
+        target_lang,
+        source_lang,
+        extra_params={
+            "tag_handling": "xml",
+            "outline_detection": "0",
+            "splitting_tags": "ln",
+        },
+    )
+    if result:
+        matches = _DEEPL_LINE_RE.findall(result[0] or "")
+        if len(matches) == len(non_empty):
+            return _rebuild([_xml_unescape(m).strip() for m in matches])
+        print(f"DeepL XML returned {len(matches)} segments for {len(non_empty)} lines; trying array mode")
+
+    # --- Strategy 2: multi-text array + paragraph context ---
+    context = " ".join(non_empty)
+    arr = _deepl_request(
+        non_empty,
+        target_lang,
+        source_lang,
+        extra_params={"context": context, "split_sentences": "0"},
+    )
+    if arr and len(arr) == len(non_empty):
+        return _rebuild(arr)
+
+    return None
 
 
 def _ts_translate(engine, text, target_lang, source_lang, attempts=1):
@@ -713,11 +839,47 @@ def _proportional_sentence_split(translated, source_paragraphs):
 
 _WORD_RE = re.compile(r"[^\w']+", re.UNICODE)
 
+# Scripts without spaces between words (CJK + Thai). For these, splitting on
+# whitespace yields ~1 "word" for a whole paragraph, which used to collapse the
+# per-line split (everything on one line, the rest blank). We segment these into
+# character units instead so the fallback splitter has something to distribute.
+_NO_SPACE_CHAR_RE = re.compile(
+    r"[぀-ヿ"      # Hiragana + Katakana
+    r"㐀-䶿"       # CJK Ext A
+    r"一-鿿"       # CJK Unified
+    r"豈-﫿"       # CJK Compatibility
+    r"ｦ-ﾟ"       # Halfwidth Katakana
+    r"฀-๿]"      # Thai
+)
+
 
 def _tokenize(text):
     if not text:
         return []
     return [tok for tok in _WORD_RE.split(text.lower()) if tok]
+
+
+def _is_no_space_script(text):
+    """True when the text is mostly a no-space script (CJK/Thai), so it should
+    be segmented by character rather than by whitespace."""
+    if not text:
+        return False
+    cjk = len(_NO_SPACE_CHAR_RE.findall(text))
+    # If a large share of non-space characters are CJK/Thai, treat as no-space.
+    non_space = sum(1 for ch in text if not ch.isspace())
+    return non_space > 0 and (cjk / non_space) >= 0.3
+
+
+def _segment_units(text):
+    """Split text into display units for alignment: whitespace-delimited words
+    for spaced scripts, or individual characters for no-space scripts (CJK/Thai)
+    so per-line splitting has enough granularity to distribute across lines."""
+    if not text:
+        return []
+    if _is_no_space_script(text):
+        # Keep non-space characters as individual units (drop spaces).
+        return [ch for ch in text if not ch.isspace()]
+    return text.split()
 
 
 def align_lines_to_paragraph(paragraph_translation, line_anchors):
@@ -741,10 +903,19 @@ def align_lines_to_paragraph(paragraph_translation, line_anchors):
     if n == 1:
         return [paragraph_translation.strip()]
 
+    # For no-space scripts (CJK/Thai), the anchor-overlap DP over CHARACTER units
+    # is unreliable — a single character matches many anchor positions, so the DP
+    # degenerates. A proportional character split (used here) is closer to even
+    # and far better than the old whole-paragraph-on-one-line collapse. This only
+    # runs on the fallback path anyway (DeepL structured output is primary).
+    if _is_no_space_script(paragraph_translation):
+        return _proportional_word_split(paragraph_translation, line_anchors)
+
     words = paragraph_translation.split()
+    joiner = " "
     m = len(words)
     if m < n:
-        # Fewer paragraph words than lines — can't give each line its own word.
+        # Fewer paragraph units than lines — can't give each line its own unit.
         # Fall back to proportional split so we at least return n chunks.
         return _proportional_word_split(paragraph_translation, line_anchors)
 
@@ -813,13 +984,17 @@ def align_lines_to_paragraph(paragraph_translation, line_anchors):
 
     chunks = []
     for j in range(n):
-        chunks.append(" ".join(words[splits[j] : splits[j + 1]]).strip())
+        chunks.append(joiner.join(words[splits[j] : splits[j + 1]]).strip())
     return chunks
 
 
 def _proportional_word_split(paragraph_translation, line_anchors):
-    """Fallback: divide paragraph words across lines by count (no semantics)."""
-    words = paragraph_translation.split()
+    """Fallback: divide paragraph units across lines by count (no semantics).
+    Uses character units for no-space scripts (CJK/Thai) so a spaceless
+    paragraph is spread across all lines instead of dumped onto one."""
+    no_space = _is_no_space_script(paragraph_translation)
+    joiner = "" if no_space else " "
+    words = _segment_units(paragraph_translation)
     n = len(line_anchors)
     if n == 0 or not words:
         return [""] * n
@@ -830,7 +1005,7 @@ def _proportional_word_split(paragraph_translation, line_anchors):
     for j in range(n):
         size = base + (1 if j < extra else 0)
         size = max(1, size)
-        chunks.append(" ".join(words[idx : idx + size]))
+        chunks.append(joiner.join(words[idx : idx + size]))
         idx += size
     return chunks
 
@@ -863,31 +1038,64 @@ def _translate_line_anchors(lines_flat, target_lang, source_lang, max_workers=8)
         return list(pool.map(_one, lines_flat))
 
 
+def _legacy_align_paragraph(paragraph_text, source_lines, target_lang, source_lang):
+    """Fallback per-line split: blob paragraph translation + per-line Google
+    anchors + DP alignment. Used only when DeepL structured translation is
+    unavailable. Kept for graceful degradation, not the primary path.
+    """
+    anchors = _translate_line_anchors(list(source_lines or []), target_lang, source_lang)
+    return align_lines_to_paragraph(paragraph_text, anchors)
+
+
 def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source_lang='auto'):
     """
-    Translate paragraphs (with full cross-paragraph context) AND produce
-    per-line aligned chunks via anchor DP alignment.
+    Translate paragraphs AND produce per-line aligned chunks such that each
+    source subtitle line maps 1:1 to a translated line.
+
+    Primary path: DeepL structured per-line translation (_deepl_translate_lines)
+    which keeps full paragraph context AND returns exact per-line boundaries, so
+    no blob-splitting/anchor-DP is needed. The paragraph translation is then the
+    join of those per-line pieces, so the paragraph view and per-line view use
+    identical wording.
+
+    Fallback path (per paragraph, only when DeepL is unavailable / returns a bad
+    count): the legacy blob translation + Google anchors + DP alignment.
 
     Returns (translated_paragraphs, translated_lines_by_paragraph).
     """
-    translated_paragraphs = translate_paragraphs(paragraphs, target_lang, source_lang)
+    n_paras = len(paragraphs)
+    translated_paragraphs = [""] * n_paras
+    translated_lines = [[] for _ in range(n_paras)]
 
-    # Flatten lines for parallel anchor translation.
-    flat_lines = []
-    offsets = []  # cumulative index where each paragraph's lines start
-    for group in lines_by_paragraph:
-        offsets.append(len(flat_lines))
-        flat_lines.extend(group or [])
-    offsets.append(len(flat_lines))
+    def _process(p_idx):
+        source_lines = lines_by_paragraph[p_idx] if p_idx < len(lines_by_paragraph) else []
+        source_lines = list(source_lines or [])
 
-    flat_anchors = _translate_line_anchors(flat_lines, target_lang, source_lang)
+        # Primary: DeepL structured per-line (context-preserving, exact 1:1).
+        if source_lines and _deepl_available():
+            per_line = _deepl_translate_lines(source_lines, target_lang, source_lang)
+            if per_line is not None and len(per_line) == len(source_lines):
+                # Paragraph text = join of the per-line translations, so both
+                # views stay perfectly consistent (same engine, same wording).
+                para_text = " ".join(chunk for chunk in per_line if chunk).strip()
+                return p_idx, para_text, per_line
 
-    translated_lines = []
-    for p_idx, group in enumerate(lines_by_paragraph):
-        start, end = offsets[p_idx], offsets[p_idx + 1]
-        anchors = flat_anchors[start:end]
-        paragraph_text = translated_paragraphs[p_idx] if p_idx < len(translated_paragraphs) else ""
-        translated_lines.append(align_lines_to_paragraph(paragraph_text, anchors))
+        # Fallback: translate the blob for context, then split via anchor DP.
+        para_text = translate_paragraphs([paragraphs[p_idx]], target_lang, source_lang)
+        para_text = para_text[0] if para_text else ""
+        if source_lines:
+            lines = _legacy_align_paragraph(para_text, source_lines, target_lang, source_lang)
+        else:
+            lines = []
+        return p_idx, para_text, lines
+
+    # Parallelize across paragraphs (a lookahead batch is small, ~3 paragraphs).
+    max_workers = min(4, max(1, n_paras))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for p_idx, para_text, lines in pool.map(_process, range(n_paras)):
+            translated_paragraphs[p_idx] = para_text
+            translated_lines[p_idx] = lines
+
     return translated_paragraphs, translated_lines
 
 
