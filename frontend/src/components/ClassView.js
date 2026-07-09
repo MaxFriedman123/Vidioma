@@ -15,6 +15,7 @@ export default function ClassView({ classId, onBack }) {
 
   // Confirm dialog state
   const [confirmAction, setConfirmAction] = useState(null); // { type, studentId, studentName }
+  const [confirmSubmitting, setConfirmSubmitting] = useState(false);
 
   const fetchClassDetail = () => {
     if (!accessToken || !classId) return;
@@ -41,9 +42,15 @@ export default function ClassView({ classId, onBack }) {
 
   const handleCopyCode = () => {
     if (!classData?.class_code) return;
+    if (!navigator.clipboard?.writeText) {
+      alert(`Copy this class code: ${classData.class_code}`);
+      return;
+    }
     navigator.clipboard.writeText(classData.class_code).then(() => {
       setCodeCopied(true);
       setTimeout(() => setCodeCopied(false), 2000);
+    }).catch(() => {
+      alert(`Copy this class code: ${classData.class_code}`);
     });
   };
 
@@ -52,11 +59,28 @@ export default function ClassView({ classId, onBack }) {
       await axios.delete(`${API_BASE_URL}/api/classes/${classId}/students/${studentId}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
+      localStorage.removeItem('vidioma_classes_cache');
       setConfirmAction(null);
-      fetchClassDetail();
+      // Update in place rather than a full refetch: a transient refetch failure
+      // would otherwise replace the whole (still-valid) class view with an
+      // error screen.
+      setStudents((prev) => prev.filter((s) => s.student_id !== studentId));
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to remove student.');
       setConfirmAction(null);
+    }
+  };
+
+  // Runs a confirm-dialog action while guarding against double-submit.
+  const runConfirmAction = async () => {
+    if (confirmSubmitting) return;
+    setConfirmSubmitting(true);
+    try {
+      if (confirmAction.type === 'delete') await handleDeleteClass();
+      else if (confirmAction.type === 'leave') await handleLeaveClass();
+      else await handleRemoveStudent(confirmAction.studentId);
+    } finally {
+      setConfirmSubmitting(false);
     }
   };
 
@@ -65,6 +89,9 @@ export default function ClassView({ classId, onBack }) {
       await axios.delete(`${API_BASE_URL}/api/classes/${classId}/students/${user.id}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
+      // Invalidate the cached class list so the class we just left doesn't
+      // reappear (and stay clickable) when we return to the dashboard.
+      localStorage.removeItem('vidioma_classes_cache');
       setConfirmAction(null);
       onBack();
     } catch (err) {
@@ -78,6 +105,7 @@ export default function ClassView({ classId, onBack }) {
       await axios.delete(`${API_BASE_URL}/api/classes/${classId}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
+      localStorage.removeItem('vidioma_classes_cache');
       setConfirmAction(null);
       onBack();
     } catch (err) {
@@ -235,18 +263,21 @@ export default function ClassView({ classId, onBack }) {
                   : `${confirmAction.studentName} will be removed from this class.`}
             </p>
             <div className="class-confirm-actions">
-              <button className="navbar-btn" onClick={() => setConfirmAction(null)}>
+              <button
+                className="navbar-btn"
+                onClick={() => setConfirmAction(null)}
+                disabled={confirmSubmitting}
+              >
                 Cancel
               </button>
               <button
                 className="class-delete-btn"
-                onClick={() => {
-                  if (confirmAction.type === 'delete') handleDeleteClass();
-                  else if (confirmAction.type === 'leave') handleLeaveClass();
-                  else handleRemoveStudent(confirmAction.studentId);
-                }}
+                onClick={runConfirmAction}
+                disabled={confirmSubmitting}
               >
-                {confirmAction.type === 'delete' ? 'Delete' : confirmAction.type === 'leave' ? 'Leave' : 'Remove'}
+                {confirmSubmitting
+                  ? '...'
+                  : confirmAction.type === 'delete' ? 'Delete' : confirmAction.type === 'leave' ? 'Leave' : 'Remove'}
               </button>
             </div>
           </div>
