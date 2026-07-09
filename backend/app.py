@@ -6,6 +6,14 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
+try:
+    # Purpose-built config for Webshare rotating RESIDENTIAL proxies: uses the
+    # correct HTTP endpoint (p.webshare.io:80), rotates IPs automatically, and
+    # retries when an IP is blocked — the reliable way past YouTube's
+    # datacenter-IP blocking on hosts like Render.
+    from youtube_transcript_api.proxies import WebshareProxyConfig
+except Exception:  # pragma: no cover - older library versions
+    WebshareProxyConfig = None
 import re
 import json
 import hashlib
@@ -244,15 +252,31 @@ def get_cached_transcript(video_id, from_lang):
     except Exception as e:
         print(f"Direct fetch failed, falling back to proxy: {e}")
 
-        # 2. FALLBACK TO SLOW PROXY IF BLOCKED OR FAILED
+        # 2. FALLBACK TO ROTATING RESIDENTIAL PROXY IF BLOCKED OR FAILED.
+        # YouTube blocks datacenter IPs (e.g. Render), so in prod this fallback
+        # is the path that actually works — direct fetch above almost always
+        # fails there.
         proxy_username = os.environ.get("WEBSHARE_USERNAME")
         proxy_password = os.environ.get("WEBSHARE_PASSWORD")
 
         if not proxy_username or not proxy_password:
             raise ValueError("Proxy credentials are not configured and direct fetch failed.")
 
-        socks5_url = f"socks5://{proxy_username}-rotate:{proxy_password}@p.webshare.io:1080"
-        proxy_config = GenericProxyConfig(http_url=socks5_url, https_url=socks5_url)
+        if WebshareProxyConfig is not None:
+            # Rotating residential proxies over Webshare's HTTP endpoint
+            # (p.webshare.io:80). This auto-rotates IPs and retries when an IP
+            # is blocked. Passing the raw username is correct — the config adds
+            # the "-rotate" suffix itself.
+            proxy_config = WebshareProxyConfig(
+                proxy_username=proxy_username,
+                proxy_password=proxy_password,
+            )
+        else:
+            # Fallback for older library versions without WebshareProxyConfig:
+            # use the HTTP rotating endpoint (NOT socks5:1080, which targets the
+            # wrong product/port and does not rotate).
+            http_url = f"http://{proxy_username}-rotate:{proxy_password}@p.webshare.io:80/"
+            proxy_config = GenericProxyConfig(http_url=http_url, https_url=http_url)
 
         proxy_api = YouTubeTranscriptApi(proxy_config=proxy_config)
         return attempt_fetch(proxy_api)
@@ -888,7 +912,30 @@ def get_transcript():
     try:
         snippets, paragraphs = get_cached_processed_snippets(video_id, from_lang)
     except Exception as e:
-        print(f"Error fetching transcript for {video_id}: {e}")
+        # Map to an actionable message + status. YouTube blocks datacenter IPs,
+        # so on hosts like Render a "blocked" error almost always means the
+        # proxy is missing/misconfigured rather than the video being unavailable.
+        msg = str(e)
+        low = msg.lower()
+        print(f"Error fetching transcript for {video_id}: {type(e).__name__}: {msg}")
+
+        if "proxy credentials are not configured" in low:
+            return jsonify({
+                "error": "Transcript fetching is temporarily unavailable (server proxy not configured).",
+            }), 503
+        if "blocked" in low or "ip" in low and "block" in low:
+            return jsonify({
+                "error": "YouTube is currently blocking transcript requests from the server. "
+                         "Please try again in a moment.",
+            }), 503
+        if "disabled" in low or "no transcript" in low or "transcriptsdisabled" in low:
+            return jsonify({
+                "error": "This video doesn't have subtitles available for the requested language.",
+            }), 404
+        if "unavailable" in low or "no longer available" in low:
+            return jsonify({
+                "error": "This video is unavailable. Please check the link and try another video.",
+            }), 404
         return jsonify({
             "error": "We couldn't fetch a transcript for this video. It may have "
                      "subtitles disabled, be unavailable, or not offer the requested language.",
