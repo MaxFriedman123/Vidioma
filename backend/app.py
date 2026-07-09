@@ -417,10 +417,38 @@ def get_cached_processed_snippets(video_id, from_lang):
 
     assigned, paragraphs = group_into_paragraphs(cleaned_fragments)
 
-    # Only translate when transcript is not already in requested language
+    # Only translate when transcript is not already in the requested language.
+    # YouTube couldn't give us a `from_lang` transcript (native or auto-
+    # translated), so the fetched text is in the video's original language. We
+    # must translate BOTH the paragraphs AND each displayed snippet line into
+    # `from_lang` — otherwise the transcript the user reads stays in the wrong
+    # language (e.g. picking German shows English) even though the target-side
+    # translation is derived correctly.
     if not is_correct_lang and paragraphs:
         print(f"Manually translating {video_id} to {from_lang}")
-        paragraphs = translate_paragraphs(paragraphs, from_lang)
+
+        # Build per-paragraph source-line lists in paragraph order so we can
+        # translate paragraphs (for context) and recover aligned per-line text.
+        lines_by_paragraph = []
+        snippet_idx_by_paragraph = []
+        for p_idx in range(len(paragraphs)):
+            members = [i for i, s in enumerate(assigned) if s["paragraph"] == p_idx]
+            snippet_idx_by_paragraph.append(members)
+            lines_by_paragraph.append([assigned[i]["source"] for i in members])
+
+        translated_paragraphs, translated_lines = translate_with_alignment(
+            paragraphs, lines_by_paragraph, from_lang, source_lang="auto"
+        )
+
+        # Overwrite each snippet's displayed source with its translated line so
+        # the shown transcript is actually in `from_lang`.
+        for p_idx, members in enumerate(snippet_idx_by_paragraph):
+            line_chunks = translated_lines[p_idx] if p_idx < len(translated_lines) else []
+            for slot, snippet_i in enumerate(members):
+                if slot < len(line_chunks) and line_chunks[slot]:
+                    assigned[snippet_i]["source"] = line_chunks[slot]
+
+        paragraphs = translated_paragraphs
 
     return assigned, paragraphs
 

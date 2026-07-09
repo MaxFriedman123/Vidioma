@@ -8,11 +8,71 @@ or with pytest (if installed):
 
 import unittest
 
+import app
 from app import group_into_paragraphs
 
 
 def make_frag(text, start, duration=1.0):
     return {"source": text, "start": start, "duration": duration}
+
+
+class TestNonNativeTranscriptLanguage(unittest.TestCase):
+    """When the requested from_lang transcript isn't natively available, BOTH
+    the paragraphs AND the displayed snippet lines must be translated into
+    from_lang (regression: picking German used to still show English lines)."""
+
+    def setUp(self):
+        self._orig_fetch = app.get_cached_transcript
+        self._orig_twa = app.translate_with_alignment
+        app.get_cached_processed_snippets.cache_clear()
+
+    def tearDown(self):
+        app.get_cached_transcript = self._orig_fetch
+        app.translate_with_alignment = self._orig_twa
+        app.get_cached_processed_snippets.cache_clear()
+
+    def test_snippets_translated_when_not_native_language(self):
+        english = [
+            {"text": "Hello everyone", "start": 0.0, "duration": 1.5},
+            {"text": "welcome to the show", "start": 1.5, "duration": 1.5},
+            {"text": "let us begin now", "start": 3.2, "duration": 1.5},
+        ]
+        # Video only has English; German (de) requested -> is_correct_lang False.
+        app.get_cached_transcript = lambda vid, lang: (english, False)
+        # Deterministic stub: tag every string with the target language.
+        app.translate_with_alignment = lambda paras, lines, target, source_lang="auto": (
+            [f"[{target}]{p}" for p in paras],
+            [[f"[{target}]{ln}" for ln in group] for group in lines],
+        )
+
+        snippets, paragraphs = app.get_cached_processed_snippets("vid", "de")
+
+        # Every displayed snippet line must now be in the requested language.
+        self.assertTrue(all(s["source"].startswith("[de]") for s in snippets))
+        self.assertTrue(all(p.startswith("[de]") for p in paragraphs))
+        # No English leaked into the shown transcript.
+        self.assertFalse(any(s["source"] == "Hello everyone" for s in snippets))
+
+    def test_native_language_left_untouched(self):
+        english = [
+            {"text": "Hello everyone", "start": 0.0, "duration": 1.5},
+            {"text": "welcome to the show", "start": 1.5, "duration": 1.5},
+        ]
+        # Video has English and English (en) requested -> is_correct_lang True.
+        app.get_cached_transcript = lambda vid, lang: (english, True)
+        called = {"twa": False}
+
+        def spy(*a, **k):
+            called["twa"] = True
+            return [], []
+
+        app.translate_with_alignment = spy
+
+        snippets, paragraphs = app.get_cached_processed_snippets("vid", "en")
+
+        # Native language: no manual translation, source lines preserved verbatim.
+        self.assertFalse(called["twa"])
+        self.assertEqual(snippets[0]["source"], "Hello everyone")
 
 
 class TestGroupIntoParagraphs(unittest.TestCase):

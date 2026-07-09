@@ -252,8 +252,14 @@ function App() {
   const [player, setPlayer] = useState(null);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [isFinished, setIsFinished] = useState(false); // Tracks if the video is done
-  const [revealPos, setRevealPos] = useState({ x: -999, y: -999 });
+  // Raw viewport cursor position; each translation line computes its own local
+  // mask coordinates from this so the flashlight reveals whichever line(s) the
+  // cursor is near — prev, current, or next — independently.
+  const [cursorViewport, setCursorViewport] = useState({ x: -9999, y: -9999 });
   const revealRef = useRef(null);
+  const prevLineWrapRef = useRef(null);
+  const currentLineWrapRef = useRef(null);
+  const nextLineWrapRef = useRef(null);
   const [needsManualPlay, setNeedsManualPlay] = useState(false);
   const playbackAttemptTimeoutsRef = useRef([]);
   const dashboardStartPromptActiveRef = useRef(false);
@@ -910,26 +916,19 @@ function App() {
     return () => clearTimeout(retryTimer);
   }, [transcript, currentLineIndex, translationStatus, retryFailedTranslations]);
 
-  // GLOBAL MOUSE + TOUCH TRACKER
+  // GLOBAL MOUSE + TOUCH TRACKER — store raw viewport coordinates. Each line's
+  // reveal layer converts these into its own local box coordinates at render,
+  // so proximity to any individual line (prev/current/next) lights just that
+  // line rather than all three sharing one container-relative position.
   useEffect(() => {
-    const updateRevealPos = (clientX, clientY) => {
-      if (revealRef.current) {
-        const rect = revealRef.current.getBoundingClientRect();
-        setRevealPos({
-          x: clientX - rect.left,
-          y: clientY - rect.top,
-        });
-      }
-    };
-
     const handleGlobalMouseMove = (e) => {
-      updateRevealPos(e.clientX, e.clientY);
+      setCursorViewport({ x: e.clientX, y: e.clientY });
     };
 
     const handleTouchMove = (e) => {
       const touch = e.touches[0];
       if (touch) {
-        updateRevealPos(touch.clientX, touch.clientY);
+        setCursorViewport({ x: touch.clientX, y: touch.clientY });
       }
     };
 
@@ -993,6 +992,29 @@ function App() {
   const currentLineTranslation = translatedLines[safeLineIndex] || '';
   const prevLineTranslation = safeLineIndex > 0 ? (translatedLines[safeLineIndex - 1] || '') : '';
   const nextLineTranslation = safeLineIndex < transcript.length - 1 ? (translatedLines[safeLineIndex + 1] || '') : '';
+
+  // Flashlight radius (px). Must match the `circle <R>px` in the mask below.
+  const REVEAL_RADIUS = 60;
+
+  // Build a radial-gradient mask for one line layer, using coordinates LOCAL to
+  // that layer's own box (converted from the viewport cursor). When the cursor
+  // is farther than the reveal radius from the box vertically, the spotlight
+  // simply falls outside the line and reveals nothing — so a cursor sitting low
+  // lights only the next line, etc. Returns undefined when the ref isn't
+  // mounted yet (mask omitted -> layer hidden until first paint).
+  const buildRevealMask = (wrapRef) => {
+    const el = wrapRef.current;
+    if (!el) return undefined;
+    const rect = el.getBoundingClientRect();
+    const localX = cursorViewport.x - rect.left;
+    const localY = cursorViewport.y - rect.top;
+    // Cheap cull: if the cursor is well outside this box vertically, don't
+    // reveal anything for it (keeps only the nearby line lit).
+    if (localY < -REVEAL_RADIUS || localY > rect.height + REVEAL_RADIUS) {
+      return `radial-gradient(circle ${REVEAL_RADIUS}px at -9999px -9999px, black 40%, transparent 100%)`;
+    }
+    return `radial-gradient(circle ${REVEAL_RADIUS}px at ${localX}px ${localY}px, black 40%, transparent 100%)`;
+  };
 
   if (authLoading) return null; // Wait for auth to initialise
 
@@ -1254,8 +1276,8 @@ function App() {
                       </div>
                     ) : (
                       <div className="scroll-window translation-scroll-window" key={`t-${safeLineIndex}`}>
-                        {/* Prev: blurred base + flashlight reveal layer sharing the same revealPos */}
-                        <div className="scroll-line scroll-line-prev translation-line-wrap">
+                        {/* Prev: blurred base + flashlight reveal layer with its OWN local mask */}
+                        <div className="scroll-line scroll-line-prev translation-line-wrap" ref={prevLineWrapRef}>
                           <div className="translation-line">
                             {prevLineTranslation || '\u00A0'}
                           </div>
@@ -1263,8 +1285,8 @@ function App() {
                             <div
                               className="translation-line clear-flashlight-layer"
                               style={{
-                                WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
-                                maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
+                                WebkitMaskImage: buildRevealMask(prevLineWrapRef),
+                                maskImage: buildRevealMask(prevLineWrapRef),
                               }}
                             >
                               {prevLineTranslation}
@@ -1272,8 +1294,8 @@ function App() {
                           )}
                         </div>
 
-                        {/* Current line: blurred base + flashlight reveal layer */}
-                        <div className="scroll-line scroll-line-current translation-current-wrap">
+                        {/* Current line: blurred base + flashlight reveal layer with its OWN local mask */}
+                        <div className="scroll-line scroll-line-current translation-current-wrap" ref={currentLineWrapRef}>
                           <h2
                             className="current-text"
                             style={{
@@ -1291,8 +1313,8 @@ function App() {
                             <h2
                               className="current-text clear-flashlight-layer"
                               style={{
-                                WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
-                                maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
+                                WebkitMaskImage: buildRevealMask(currentLineWrapRef),
+                                maskImage: buildRevealMask(currentLineWrapRef),
                               }}
                             >
                               {currentLineTranslation}
@@ -1300,7 +1322,7 @@ function App() {
                           )}
                         </div>
 
-                        <div className="scroll-line scroll-line-next translation-line-wrap">
+                        <div className="scroll-line scroll-line-next translation-line-wrap" ref={nextLineWrapRef}>
                           <div className="translation-line">
                             {nextLineTranslation || '\u00A0'}
                           </div>
@@ -1308,8 +1330,8 @@ function App() {
                             <div
                               className="translation-line clear-flashlight-layer"
                               style={{
-                                WebkitMaskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
-                                maskImage: `radial-gradient(circle 60px at ${revealPos.x}px ${revealPos.y}px, black 40%, transparent 100%)`,
+                                WebkitMaskImage: buildRevealMask(nextLineWrapRef),
+                                maskImage: buildRevealMask(nextLineWrapRef),
                               }}
                             >
                               {nextLineTranslation}
