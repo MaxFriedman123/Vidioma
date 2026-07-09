@@ -1609,6 +1609,10 @@
   margin: 40px auto;
   padding: 0 20px;
   box-sizing: border-box;
+  /* Reset the global .App text-align:center so titles/descriptions left-anchor
+     like their sibling content instead of floating centered over it. Elements
+     that must stay centered (empty states, modal titles) carry their own rule. */
+  text-align: left;
 }
 
 .class-dashboard-header {
@@ -1792,7 +1796,12 @@
   margin: 20px auto;
   padding: 0 20px;
   box-sizing: border-box;
+  text-align: left;
 }
+
+/* CreateAssignment shares the .class-view width so the whole assignment flow
+   (Create, ClassView, AssignmentDetail) keeps one stable left edge. */
+.assignment-create { max-width: 700px; }
 
 .class-back-btn {
   position: relative;
@@ -2183,8 +2192,37 @@
 }
 .create-dropdown-item:hover { background: #7dd3e8; color: #000; }
 
-/* Assignment creation form */
-.assignment-form { max-width: 620px; margin: 0 auto; text-align: left; }
+/* Assignment creation form.
+   The form left-anchors to its container (.class-view) so the Back button,
+   title and form share one left edge instead of three different anchors. */
+.assignment-form { max-width: 100%; margin: 0; text-align: left; }
+
+/* Grouped sections turn the flat field stack into scannable "areas" */
+.assignment-section {
+  background: #2d2d2d;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 4px 18px 20px;
+  margin-bottom: 16px;
+}
+.assignment-section-title {
+  font-size: 0.82rem;
+  color: #cfd6e0;
+  margin: 16px 0 4px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.assignment-section-optional {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: #888;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 8px;
+}
+/* First label in a section sits right under the section title — tighten the gap */
+.assignment-section > .assignment-label:first-of-type { margin-top: 10px; }
 .assignment-label {
   display: block;
   margin: 18px 0 6px;
@@ -2205,12 +2243,12 @@
 }
 .assignment-lang-row { display: flex; gap: 16px; }
 .assignment-lang-row > div { flex: 1; min-width: 0; }
-.assignment-targets { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+.assignment-targets { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
 .assignment-target-class {
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   padding: 14px 16px;
-  background: #2d2d2d;
+  background: #333640;
 }
 .assignment-target-header {
   display: flex;
@@ -2219,11 +2257,17 @@
   flex-wrap: wrap;
   gap: 10px;
 }
-.assignment-target-name { font-weight: 600; color: #fff; }
-.assignment-target-modes { display: flex; gap: 6px; }
+.assignment-target-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.assignment-target-modes { display: flex; flex-wrap: wrap; gap: 6px; }
 .assignment-mode-btn {
   padding: 6px 12px;
-  border-radius: 999px;
+  border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: transparent;
   color: #9fb0c8;
@@ -2232,7 +2276,7 @@
   cursor: pointer;
   transition: all 0.15s ease;
 }
-.assignment-mode-btn:hover { border-color: #7dd3e8; color: #cfeff6; }
+.assignment-mode-btn:hover { border-color: #7dd3e8; color: #7dd3e8; }
 .assignment-mode-btn.active {
   background: #7dd3e8;
   border-color: #7dd3e8;
@@ -2246,6 +2290,9 @@
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 8px 16px;
 }
+/* Loading / empty messages are the sole grid child — let them span all tracks
+   instead of huddling in the first 180px column. (Populated rows are <label>.) */
+.assignment-roster > p { grid-column: 1 / -1; margin: 0; }
 .assignment-student-option {
   display: flex;
   align-items: center;
@@ -2253,8 +2300,10 @@
   color: #e0e0e0;
   font-size: 0.9rem;
   cursor: pointer;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.assignment-student-option input { accent-color: #7dd3e8; width: 16px; height: 16px; }
+.assignment-student-option input { accent-color: #7dd3e8; width: 16px; height: 16px; flex-shrink: 0; }
 
 /* Assignment list inside a class */
 .assignment-list { display: flex; flex-direction: column; gap: 10px; }
@@ -2265,14 +2314,19 @@
   gap: 14px;
   padding: 14px 18px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: #333640;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.15s ease;
 }
-.assignment-list-item:hover { background: #3b3f4b; border-color: rgba(125, 211, 232, 0.4); }
+.assignment-list-item:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  border-color: rgba(125, 211, 232, 0.4);
+}
 .assignment-list-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .assignment-list-title {
+  font-size: 1rem;
   font-weight: 600;
   color: #fff;
   white-space: nowrap;
@@ -2287,9 +2341,9 @@
 .assignment-due-overdue { color: #ff6b6b !important; }
 
 /* Assignment status badges */
-.assignment-status-complete { color: #a8e6cf; font-weight: 600; }
-.assignment-status-progress { color: #ffd479; font-weight: 600; }
-.assignment-status-notstarted { color: #888; }
+.assignment-status-complete { font-size: 0.85rem; color: #a8e6cf; font-weight: 600; }
+.assignment-status-progress { font-size: 0.85rem; color: #ffd479; font-weight: 600; }
+.assignment-status-notstarted { font-size: 0.85rem; color: #888; font-weight: 600; }
 .assignment-student-progress { flex: 1; gap: 6px; display: flex; flex-direction: column; }
 .assignment-detail-thumb {
   width: 160px;
@@ -2331,15 +2385,56 @@
   border-radius: 6px;
   text-transform: uppercase;
 }
-.assignment-player-title { font-weight: 600; color: #fff; }
-.assignment-player-due { color: #ffd479; font-size: 0.85rem; }
-.assignment-player-note { color: #888; font-size: 0.82rem; margin-left: auto; }
+.assignment-player-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assignment-player-due { color: #9fb0c8; font-size: 0.85rem; }
+.assignment-player-note { color: #888; font-size: 0.82rem; }
 
-@media (max-width: 700px) {
+/* Give the primary CTA breathing room from the Assign-to section / error */
+.assignment-form .auth-submit { margin-top: 8px; }
+.assignment-form .auth-error { margin: 4px 0 12px; }
+
+/* Long unbroken class/assignment titles break inside the header instead of
+   overflowing (list titles ellipsize; header titles wrap). */
+.class-header-name { overflow-wrap: anywhere; }
+.class-header-tags { flex-wrap: wrap; }
+
+/* -------------------- ASSIGNMENT RESPONSIVE (<=768px) --------------------
+   Unified with the class breakpoint so container + content reflow together. */
+@media (max-width: 768px) {
   .assignment-lang-row { flex-direction: column; gap: 0; }
-  .assignment-form { max-width: 100%; }
+
+  /* Match the "My Classes" title shrink so both teacher screens scale alike */
+  .assignment-create > .dashboard-title { font-size: 1.4rem; }
+
+  /* Stack each class's name above its mode pills; let the pills fill the row */
+  .assignment-target-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .assignment-target-modes { flex-wrap: wrap; width: 100%; }
+
+  /* Comfortable single-column tap targets for the roster */
+  .assignment-roster { grid-template-columns: 1fr; gap: 2px 0; }
+  .assignment-student-option { padding: 10px 4px; font-size: 0.95rem; }
+
+  /* Assignment rows stack their title over the meta row */
   .assignment-list-item { flex-direction: column; align-items: flex-start; gap: 10px; }
   .assignment-list-meta { width: 100%; justify-content: space-between; }
-  .assignment-player-note { margin-left: 0; }
+
+  .assignment-player-banner { padding: 10px 14px; gap: 8px; }
+  .assignment-player-title { flex: 1 1 100%; white-space: normal; }
   .assignment-detail-thumb { display: none; }
+}
+
+@media (max-width: 400px) {
+  /* The list Start/Continue pill also carries .class-action-btn, which goes
+     full-width at <=400px — keep it compact so it doesn't dwarf the due date. */
+  .assignment-list-btn { width: auto; align-self: flex-end; }
+  .assignment-mode-btn { flex: 1 1 auto; text-align: center; }
 }

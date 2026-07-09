@@ -249,30 +249,25 @@ export default function ClassView({ classId, onBack, onStartAssignment, onOpenAs
         )}
       </div>
 
-      {/* Teacher Card */}
-      <div className="class-section">
-        <h3 className="class-section-title">Teacher</h3>
-        <div className="class-member-card class-teacher-card">
-          <div className="class-member-avatar">
-            {(teacherProfile?.user_name || 'T').charAt(0).toUpperCase()}
-          </div>
-          <div className="class-member-info">
-            <span className="class-member-name">{teacherProfile?.user_name || 'Teacher'}</span>
-            <span className="class-member-badge class-badge-teacher">Teacher</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Students List */}
+      {/* Members: teacher first (its cyan-bordered card sets it apart), then students */}
       <div className="class-section">
         <h3 className="class-section-title">
-          Students ({students.length})
+          Members ({students.length + 1})
         </h3>
-        {students.length === 0 ? (
-          <p className="class-empty-students">No students have joined this class yet.</p>
-        ) : (
-          <div className="class-members-list">
-            {students.map((s) => {
+        <div className="class-members-list">
+          <div className="class-member-card class-teacher-card">
+            <div className="class-member-avatar">
+              {(teacherProfile?.user_name || 'T').charAt(0).toUpperCase()}
+            </div>
+            <div className="class-member-info">
+              <span className="class-member-name">{teacherProfile?.user_name || 'Teacher'}</span>
+              <span className="class-member-badge class-badge-teacher">Teacher</span>
+            </div>
+          </div>
+          {students.length === 0 ? (
+            <p className="class-empty-students">No students have joined this class yet.</p>
+          ) : (
+            students.map((s) => {
               const studentName = s.user_profiles?.user_name || 'Student';
               const isSelf = s.student_id === user?.id;
               return (
@@ -304,9 +299,9 @@ export default function ClassView({ classId, onBack, onStartAssignment, onOpenAs
                   )}
                 </div>
               );
-            })}
-          </div>
-        )}
+            })
+          )}
+        </div>
       </div>
 
       {/* Teacher actions */}
