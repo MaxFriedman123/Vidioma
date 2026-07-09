@@ -7,6 +7,4 @@ redis
 requests[socks]
 gunicorn
 python-dotenv
-PySocks
 PyJWT[crypto]
-supabase

@@ -218,6 +218,8 @@ function App() {
 
   const [loadingText, setLoadingText] = useState("Extracting audio...");
   const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState(null); // transcript-fetch failure message (null = no error)
+  const [translationRetryNonce, setTranslationRetryNonce] = useState(0); // bumps to re-trigger failed paragraph fetches
   const [url, setUrl] = useState('');
   const [paragraphs, setParagraphs] = useState([]); // Source-language paragraphs
   const [translatedParagraphs, setTranslatedParagraphs] = useState({}); // paragraph index -> translated string
@@ -412,6 +414,7 @@ function App() {
     setUrl(nextUrl);
     setVideoId(nextVideoId);
     setIsLoading(true);
+    setLoadError(null);
     setView('player');
     setPlaybackLaunchSource(launchSource);
     dashboardStartPromptActiveRef.current = launchSource === 'dashboard';
@@ -491,7 +494,10 @@ function App() {
       }
 
       console.error("Error:", error);
-      setIsError(true);
+      setLoadError(
+        error?.response?.data?.error ||
+        "We couldn't load this video. Check the URL and your connection, then try again."
+      );
     } finally {
       if (transcriptRequestControllerRef.current === controller) {
         transcriptRequestControllerRef.current = null;
@@ -542,7 +548,10 @@ function App() {
       }
 
       console.error('Error:', error);
-      setIsError(true);
+      setLoadError(
+        error?.response?.data?.error ||
+        "We couldn't load this video. Please try again."
+      );
     } finally {
       if (transcriptRequestControllerRef.current === controller) {
         transcriptRequestControllerRef.current = null;
@@ -582,6 +591,7 @@ function App() {
     setUserInput('');
     setAnswered(false);
     setIsError(false);
+    setLoadError(null);
     setIsFinished(false);
     setPlayer(null);
     setIsPlayerReady(false);
@@ -598,6 +608,22 @@ function App() {
   const handleManualPlay = () => {
     attemptPlayback({ seekToCurrentLine: true, allowMutedFallback: true, unmuteAfterStart: true });
   };
+
+  // Retry translations that previously failed: drop their 'failed' status and
+  // clear the in-flight guard so the lazy-loading effect re-requests them.
+  const retryFailedTranslations = useCallback(() => {
+    setTranslationStatus((prev) => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach((idx) => {
+        if (updated[idx] === 'failed') {
+          delete updated[idx];
+          fetchingRef.current.delete(Number(idx));
+        }
+      });
+      return updated;
+    });
+    setTranslationRetryNonce((n) => n + 1);
+  }, []);
 
   // ---------------------------------------------------------
   // LAZY LOADING PARAGRAPH TRANSLATIONS (Fetch just-in-time)
@@ -617,6 +643,10 @@ function App() {
     const linesToFetch = [];
 
     for (let p = currentParagraphIdx; p <= currentParagraphIdx + PARAGRAPH_LOOKAHEAD && p < paragraphs.length; p++) {
+      // Fetch a paragraph if we don't already have a translation for it and it
+      // isn't currently in flight. A previously 'failed' paragraph has no entry
+      // in translatedParagraphs, so it becomes eligible again whenever this
+      // effect re-runs (e.g. after a retry nonce bump or line change).
       if (!hasOwn(translatedParagraphs, p) && !fetchingRef.current.has(p)) {
         paragraphIndicesToFetch.push(p);
         paragraphTextsToFetch.push(paragraphs[p]);
@@ -694,7 +724,7 @@ function App() {
     }).finally(() => {
       translationRequestControllersRef.current.delete(controller);
     });
-  }, [currentLineIndex, transcript, paragraphs, toLang, fromLang, translatedParagraphs]);
+  }, [currentLineIndex, transcript, paragraphs, toLang, fromLang, translatedParagraphs, translationRetryNonce]);
 
   // ---------------------------------------------------------
   // THE BRAKE PEDAL (Auto-Pause & Sync Logic)
@@ -846,6 +876,20 @@ function App() {
       inputRef.current.focus();
     }
   }, [showInput]);
+
+  // Auto-retry a failed translation for the paragraph the user is currently on,
+  // so a transient provider blip doesn't permanently strand them on a line.
+  useEffect(() => {
+    const currentLine = transcript[currentLineIndex];
+    if (!currentLine) return;
+    const pIdx = currentLine.paragraph ?? 0;
+    if (translationStatus[pIdx] !== 'failed') return;
+
+    const retryTimer = setTimeout(() => {
+      retryFailedTranslations();
+    }, 4000);
+    return () => clearTimeout(retryTimer);
+  }, [transcript, currentLineIndex, translationStatus, retryFailedTranslations]);
 
   // GLOBAL MOUSE + TOUCH TRACKER
   useEffect(() => {
@@ -1124,6 +1168,23 @@ function App() {
                     {loadingText}
                   </h2>
                 </div>
+              ) : loadError ? (
+                <div className="focus-card">
+                  <h2 className="current-text" style={{ color: '#e06c6c' }}>
+                    Couldn't load this video
+                  </h2>
+                  <p className="victory-subtitle" style={{ marginTop: 12 }}>
+                    {loadError}
+                  </p>
+                  <div className="input-row" style={{ justifyContent: 'center', gap: 12, marginTop: 16 }}>
+                    <button className="go-button" onClick={handleSubmit}>
+                      Try Again
+                    </button>
+                    <button className="go-button victory-button" onClick={handleBack}>
+                      Back to Search
+                    </button>
+                  </div>
+                </div>
               ) : transcript.length > 0 && (
                 isFinished ? (
                   <div className="focus-card victory-card">
@@ -1162,7 +1223,16 @@ function App() {
                         </div>
                       </div>
                     ) : translationFailed ? (
-                      <p className="translation-failed-text">Translation delayed. Keep going, we will retry shortly.</p>
+                      <div className="translation-loading-block">
+                        <p className="translation-failed-text">Translation delayed. We'll retry automatically.</p>
+                        <button
+                          type="button"
+                          className="guest-banner-btn"
+                          onClick={retryFailedTranslations}
+                        >
+                          Retry now
+                        </button>
+                      </div>
                     ) : (
                       <div className="scroll-window translation-scroll-window" key={`t-${safeLineIndex}`}>
                         {/* Prev: blurred base + flashlight reveal layer sharing the same revealPos */}

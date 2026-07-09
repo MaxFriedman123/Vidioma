@@ -117,9 +117,15 @@ export default function ClassDashboard({ onSelectClass }) {
   };
 
   const handleCopyCode = (code) => {
+    if (!navigator.clipboard?.writeText) {
+      alert(`Copy this class code: ${code}`);
+      return;
+    }
     navigator.clipboard.writeText(code).then(() => {
       setCodeCopied(true);
       setTimeout(() => setCodeCopied(false), 2000);
+    }).catch(() => {
+      alert(`Copy this class code: ${code}`);
     });
   };
 

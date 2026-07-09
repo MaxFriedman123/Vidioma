@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import axios from 'axios';
 
@@ -26,10 +26,17 @@ export function AuthProvider({ children }) {
     }
 
     // Get current session
-    supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSession(s);
-      setLoading(false);
-    });
+    supabase.auth.getSession()
+      .then(({ data: { session: s } }) => {
+        setSession(s);
+      })
+      .catch((err) => {
+        // Never leave the app stuck on a blank loading screen if the initial
+        // session lookup fails — fall back to the signed-out state.
+        console.error('getSession failed:', err);
+        setSession(null);
+      })
+      .finally(() => setLoading(false));
 
     // Listen for auth changes (login, logout, token refresh, password recovery)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -54,9 +61,14 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  // Tracks the token of the most recent profile fetch so a slow in-flight
+  // request can't apply its result after logout or an account switch.
+  const activeProfileTokenRef = useRef(null);
+
   // ── Fetch user profile when session changes ────────────────────────
   const fetchProfile = useCallback(async (token) => {
-    if (!token) { setAndCacheProfile(null); return; }
+    if (!token) { activeProfileTokenRef.current = null; setAndCacheProfile(null); return; }
+    activeProfileTokenRef.current = token;
     // Only show loading spinner if we have no cached profile
     const hasCached = !!localStorage.getItem('vidioma_user_profile');
     if (!hasCached) setProfileLoading(true);
@@ -64,12 +76,16 @@ export function AuthProvider({ children }) {
       const resp = await axios.get(`${API_BASE_URL}/api/profile`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      // Discard the result if the session changed (logout / new login) while
+      // this request was in flight.
+      if (activeProfileTokenRef.current !== token) return;
       setAndCacheProfile(resp.data.profile || null);
     } catch {
+      if (activeProfileTokenRef.current !== token) return;
       // Keep cached profile on network error; only clear if we had none
       if (!hasCached) setAndCacheProfile(null);
     } finally {
-      setProfileLoading(false);
+      if (activeProfileTokenRef.current === token) setProfileLoading(false);
     }
   }, [setAndCacheProfile]);
 
@@ -81,25 +97,31 @@ export function AuthProvider({ children }) {
     }
   }, [session, fetchProfile, setAndCacheProfile]);
 
-  const createProfile = useCallback(async (userName, userRole) => {
-    if (!session?.access_token) throw new Error('Not authenticated');
+  // Accept an optional explicit token: right after signUp/logIn the `session`
+  // in this closure hasn't been updated by onAuthStateChange yet, so callers
+  // (e.g. AuthModal) can pass the token they just received to avoid a spurious
+  // "Not authenticated" error.
+  const createProfile = useCallback(async (userName, userRole, tokenOverride) => {
+    const token = tokenOverride || session?.access_token;
+    if (!token) throw new Error('Not authenticated');
     const resp = await axios.post(`${API_BASE_URL}/api/profile`, {
       user_name: userName,
       user_role: userRole,
     }, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
     const profile = resp.data.profile;
     setAndCacheProfile(profile);
     return profile;
   }, [session, setAndCacheProfile]);
 
-  const updateProfileName = useCallback(async (userName) => {
-    if (!session?.access_token) throw new Error('Not authenticated');
+  const updateProfileName = useCallback(async (userName, tokenOverride) => {
+    const token = tokenOverride || session?.access_token;
+    if (!token) throw new Error('Not authenticated');
     const resp = await axios.patch(`${API_BASE_URL}/api/profile/name`, {
       user_name: userName,
     }, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
     const profile = resp.data.profile;
     setAndCacheProfile(profile);
@@ -129,31 +151,50 @@ export function AuthProvider({ children }) {
 
     const token = session.access_token;
 
-    // Fire upsert calls for each saved progress entry
-    const promises = keysToMigrate.map((key) => {
+    // Fire an upsert for each saved progress entry. Track per-key success so we
+    // only delete localStorage entries that actually made it to the server —
+    // otherwise a failed upsert (offline, 500) silently destroys the guest's
+    // progress. A malformed/unparseable key is safe to drop (nothing to save).
+    const migrations = keysToMigrate.map((key) => {
+      let data;
       try {
-        const data = JSON.parse(localStorage.getItem(key));
-        if (!data || !data.youtube_id) return Promise.resolve();
-
-        return axios.post(`${API_BASE_URL}/api/progress/upsert`, {
-          youtube_id: data.youtube_id,
-          transcript_language: data.transcript_language || 'en',
-          translation_language: data.translation_language || 'es',
-          current_line_index: data.current_line_index || 0,
-          total_lines: data.total_lines || 0,
-          title: data.title || null,
-        }, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        data = JSON.parse(localStorage.getItem(key));
       } catch {
-        return Promise.resolve();
+        return { key, deletable: true }; // corrupt entry — nothing to preserve
       }
+      if (!data || !data.youtube_id) {
+        return { key, deletable: true };
+      }
+
+      return axios.post(`${API_BASE_URL}/api/progress/upsert`, {
+        youtube_id: data.youtube_id,
+        transcript_language: data.transcript_language || 'en',
+        translation_language: data.translation_language || 'es',
+        current_line_index: data.current_line_index || 0,
+        total_lines: data.total_lines || 0,
+        title: data.title || null,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then(() => ({ key, deletable: true }))
+        .catch(() => ({ key, deletable: false })); // keep for a later retry
     });
 
-    Promise.allSettled(promises).then(() => {
-      // Clear migrated keys
-      keysToMigrate.forEach((key) => localStorage.removeItem(key));
-      sessionStorage.setItem('vidioma_progress_migrated', 'true');
+    Promise.allSettled(migrations).then((results) => {
+      let allDeletable = true;
+      results.forEach((r) => {
+        const outcome = r.status === 'fulfilled' ? r.value : null;
+        if (outcome && outcome.deletable) {
+          localStorage.removeItem(outcome.key);
+        } else {
+          allDeletable = false;
+        }
+      });
+      // Only mark migration complete once every entry was safely migrated, so
+      // entries that failed this session get retried on the next login.
+      if (allDeletable) {
+        sessionStorage.setItem('vidioma_progress_migrated', 'true');
+      }
     });
   }, [session]);
 
@@ -193,7 +234,9 @@ export function AuthProvider({ children }) {
 
   const logOut = useCallback(async () => {
     if (!supabase) return;
+    activeProfileTokenRef.current = null;
     sessionStorage.removeItem('vidioma_progress_migrated');
+    sessionStorage.removeItem('vidioma_pending_profile');
     localStorage.removeItem('vidioma_user_profile');
     localStorage.removeItem('vidioma_classes_cache');
     localStorage.removeItem('vidioma_dashboard_cache');

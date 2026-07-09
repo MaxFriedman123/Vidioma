@@ -73,6 +73,17 @@ function setUpAuthSession(accessToken = 'test-jwt-token') {
     return { data: { subscription: { unsubscribe: jest.fn() } } };
   });
 
+  // AuthContext fetches the profile from /api/profile once a session exists.
+  // Without a mocked response the navbar never becomes "ready", so provide one.
+  axios.get.mockImplementation((requestUrl) => {
+    if (typeof requestUrl === 'string' && requestUrl.includes('/api/profile')) {
+      return Promise.resolve({
+        data: { profile: { user_id: 'user-uuid', user_name: 'Test User', user_role: 'student' } },
+      });
+    }
+    return Promise.resolve({ data: {} });
+  });
+
   return session;
 }
 
@@ -142,18 +153,30 @@ describe('Auth Flow', () => {
     setUpAuthSession();
     await act(async () => { renderApp(); });
 
+    // "My Dashboard" is a top-level navbar button; "Log Out" lives in the
+    // avatar dropdown, so open it first. (There are desktop + mobile avatars.)
     await waitFor(() => {
-      expect(screen.getByText('My Dashboard')).toBeInTheDocument();
+      expect(screen.getAllByText('My Dashboard').length).toBeGreaterThan(0);
+      expect(screen.getAllByLabelText('Account menu').length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByLabelText('Account menu')[0]);
+    await waitFor(() => {
       expect(screen.getByText('Log Out')).toBeInTheDocument();
     });
   });
 
-  test('authenticated user sees their email in the navbar', async () => {
+  test('authenticated user sees their profile name in the navbar', async () => {
     setUpAuthSession();
     await act(async () => { renderApp(); });
 
+    // The navbar shows the profile name/initial (not the email). Opening the
+    // avatar menu reveals the full name.
     await waitFor(() => {
-      expect(screen.getByText('test@example.com')).toBeInTheDocument();
+      expect(screen.getAllByLabelText('Account menu').length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByLabelText('Account menu')[0]);
+    await waitFor(() => {
+      expect(screen.getByText('Test User')).toBeInTheDocument();
     });
   });
 });
@@ -209,6 +232,34 @@ describe('Migration Flow', () => {
     await waitFor(() => {
       expect(localStorage.getItem('vidioma_progress_dQw4w9WgXcQ_en_es')).toBeNull();
     });
+  });
+
+  test('does NOT delete guest progress when its upsert fails', async () => {
+    // Regression: a failed upsert must not destroy the guest's local progress,
+    // and migration must not be marked complete (so it retries next login).
+    localStorage.setItem(
+      'vidioma_progress_failvid_en_es',
+      JSON.stringify({ youtube_id: 'failvid', current_line_index: 7, total_lines: 20 })
+    );
+
+    // Profile GET resolves; the progress upsert rejects.
+    axios.post.mockRejectedValue(new Error('network down'));
+    setUpAuthSession('migration-token');
+
+    await act(async () => { renderApp(); });
+
+    await waitFor(() => {
+      const upsertCalls = axios.post.mock.calls.filter(
+        ([url]) => url.includes('/api/progress/upsert')
+      );
+      expect(upsertCalls.length).toBe(1);
+    });
+
+    // The failed key must survive, and migration must NOT be flagged complete.
+    await waitFor(() => {
+      expect(localStorage.getItem('vidioma_progress_failvid_en_es')).not.toBeNull();
+    });
+    expect(sessionStorage.getItem('vidioma_progress_migrated')).toBeNull();
   });
 
   test('does not re-migrate if already migrated this session', async () => {
