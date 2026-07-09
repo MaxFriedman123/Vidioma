@@ -1812,6 +1812,17 @@ def _get_role(user_id):
     return profile[0].get("user_role") if profile else None
 
 
+def _names_for_users(user_ids):
+    """Map a set of user ids -> user_name. Assignment FKs point at auth.users,
+    not user_profiles, so we can't embed the name via PostgREST — look it up.
+    Returns {} for an empty/None input set."""
+    ids = {u for u in (user_ids or set()) if u}
+    if not ids:
+        return {}
+    profiles = _sb_get("user_profiles", {"select": "user_id, user_name", "user_id": f"in.({','.join(ids)})"})
+    return {p["user_id"]: p.get("user_name") for p in profiles}
+
+
 def _teacher_owns_class(class_id, teacher_id):
     rows = _sb_get("classes", {"select": "class_id", "class_id": f"eq.{class_id}", "teacher_id": f"eq.{teacher_id}"})
     return bool(rows)
@@ -1955,12 +1966,27 @@ def list_assignments():
 
     try:
         if role == "teacher":
+            # When scoped to a class (ClassView), limit to assignments that
+            # target that class — otherwise a teacher viewing one class would
+            # see every assignment they've ever made across all classes.
+            class_assignment_ids = None
+            if class_filter:
+                ct = _sb_get("assignment_targets", {
+                    "select": "assignment_id",
+                    "class_id": f"eq.{class_filter}",
+                })
+                class_assignment_ids = {t["assignment_id"] for t in ct}
+                if not class_assignment_ids:
+                    return jsonify({"assignments": [], "role": "teacher"})
+
             params = {
                 "select": "*, videos(youtube_id, title, thumbnail_url)",
                 "teacher_id": f"eq.{g.user_id}",
                 "is_active": "eq.true",
                 "order": "created_at.desc",
             }
+            if class_assignment_ids is not None:
+                params["assignment_id"] = f"in.({','.join(class_assignment_ids)})"
             assignments = _sb_get("assignments", params)
             result = []
             for a in assignments:
@@ -2001,8 +2027,11 @@ def list_assignments():
             return jsonify({"assignments": [], "role": "student"})
 
         in_ids = ",".join(assignment_ids)
+        # NOTE: teacher_id references auth.users (not user_profiles), so we can't
+        # embed the teacher name via a PostgREST FK join here — look it up
+        # separately below.
         assignments = _sb_get("assignments", {
-            "select": "*, videos(youtube_id, title, thumbnail_url), user_profiles!assignments_teacher_id_fkey(user_name)",
+            "select": "*, videos(youtube_id, title, thumbnail_url)",
             "assignment_id": f"in.({in_ids})",
             "is_active": "eq.true",
             "order": "due_date.asc.nullslast",
@@ -2016,6 +2045,8 @@ def list_assignments():
         })
         prog_by_assignment = {p["assignment_id"]: p for p in my_prog}
 
+        teacher_names = _names_for_users({a.get("teacher_id") for a in assignments})
+
         result = []
         for a in assignments:
             aid = a["assignment_id"]
@@ -2024,6 +2055,7 @@ def list_assignments():
                 continue
             a["class_id"] = cls_id
             a["progress"] = prog_by_assignment.get(aid)
+            a["teacher_name"] = teacher_names.get(a.get("teacher_id"))
             result.append(a)
         return jsonify({"assignments": result, "role": "student"})
     except Exception as e:
@@ -2041,12 +2073,13 @@ def get_assignment_detail(assignment_id):
 
     try:
         rows = _sb_get("assignments", {
-            "select": "*, videos(youtube_id, title, thumbnail_url), user_profiles!assignments_teacher_id_fkey(user_name)",
+            "select": "*, videos(youtube_id, title, thumbnail_url)",
             "assignment_id": f"eq.{assignment_id}",
         })
         if not rows:
             return jsonify({"error": "Assignment not found"}), 404
         assignment = rows[0]
+        assignment["teacher_name"] = _names_for_users({assignment.get("teacher_id")}).get(assignment.get("teacher_id"))
         is_teacher = assignment["teacher_id"] == g.user_id
 
         if is_teacher:

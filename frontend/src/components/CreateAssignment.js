@@ -101,6 +101,19 @@ export default function CreateAssignment({ onBack, onCreated }) {
     e.preventDefault();
     setError('');
     if (!url.trim()) { setError('Enter a YouTube URL.'); return; }
+    if (fromLang === toLang) {
+      setError('Choose two different languages — the video language and the translation must differ.');
+      return;
+    }
+    // Flag classes set to "Pick students" but with nothing selected, so the
+    // teacher isn't silently left with an empty assignment.
+    const emptyPick = classes.find(
+      (c) => (classMode[c.class_id] || 'none') === 'some' && (selectedStudents[c.class_id]?.size || 0) === 0
+    );
+    if (emptyPick) {
+      setError(`Select at least one student in "${emptyPick.class_name}", or change it to Whole class / None.`);
+      return;
+    }
     const { class_ids, student_targets } = buildTargets();
     if (class_ids.length === 0 && student_targets.length === 0) {
       setError('Select at least one class or student to assign to.');

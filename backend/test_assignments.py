@@ -204,6 +204,62 @@ class TestStudentListing(AssignmentTestBase):
         self.assertEqual(len(r.get_json()["assignments"]), 0)
 
 
+class TestAssignmentDetail(AssignmentTestBase):
+    """Regression: detail/list must NOT rely on a user_profiles FK embed
+    (teacher_id references auth.users), and must return the teacher name."""
+
+    def _make(self):
+        self.client.post("/api/assignments", json={
+            "url": "https://youtu.be/jNQXAC9I4Ss", "title": "Zoo", "class_ids": ["c1"],
+        }, headers=self.hdr())
+        return self.db.tables["assignments"][0]["assignment_id"]
+
+    def test_teacher_detail_returns_students_and_name(self):
+        aid = self._make()
+        r = self.client.get(f"/api/assignments/{aid}", headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertTrue(body["is_teacher"])
+        # Whole-class assignment -> both students listed.
+        self.assertEqual({s["student_id"] for s in body["students"]}, {"stud1", "stud2"})
+        self.assertEqual(body["assignment"]["teacher_name"], "Teacher One")
+
+    def test_student_detail_returns_own_view(self):
+        aid = self._make()
+        self.as_user("stud1")
+        r = self.client.get(f"/api/assignments/{aid}", headers=self.hdr())
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["is_teacher"])
+        self.assertEqual(body["assignment"]["teacher_name"], "Teacher One")
+
+    def test_student_listing_includes_teacher_name(self):
+        self._make()
+        self.as_user("stud1")
+        r = self.client.get("/api/assignments", headers=self.hdr())
+        body = r.get_json()
+        self.assertEqual(len(body["assignments"]), 1)
+        self.assertEqual(body["assignments"][0]["teacher_name"], "Teacher One")
+
+    def test_teacher_list_scoped_by_class_filter(self):
+        # Two classes owned by the same teacher; one assignment in each.
+        self.db.tables["classes"].append({"class_id": "c2", "class_name": "French 101", "teacher_id": "teach1", "is_active": True})
+        self.client.post("/api/assignments", json={"url": "https://youtu.be/jNQXAC9I4Ss", "class_ids": ["c1"]}, headers=self.hdr())
+        self.client.post("/api/assignments", json={"url": "https://youtu.be/aaaaaaaaaaa", "class_ids": ["c2"]}, headers=self.hdr())
+
+        # Unscoped: teacher sees both.
+        r = self.client.get("/api/assignments", headers=self.hdr())
+        self.assertEqual(len(r.get_json()["assignments"]), 2)
+        # Scoped to c1: only the c1 assignment.
+        r = self.client.get("/api/assignments?class_id=c1", headers=self.hdr())
+        body = r.get_json()
+        self.assertEqual(len(body["assignments"]), 1)
+        # Scoped to a class with no assignments: empty.
+        self.db.tables["classes"].append({"class_id": "c3", "class_name": "Empty", "teacher_id": "teach1", "is_active": True})
+        r = self.client.get("/api/assignments?class_id=c3", headers=self.hdr())
+        self.assertEqual(len(r.get_json()["assignments"]), 0)
+
+
 class TestNoSkipProgress(AssignmentTestBase):
     def _make(self):
         self.client.post("/api/assignments", json={"url": "https://youtu.be/jNQXAC9I4Ss", "class_ids": ["c1"]}, headers=self.hdr())
