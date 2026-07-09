@@ -121,8 +121,8 @@ export default function Dashboard({ onSelectVideo }) {
                   {video.title || video.youtube_id}
                 </h3>
                 <p className="dashboard-card-langs">
-                  {item.transcript_language.toUpperCase()} &rarr;{' '}
-                  {item.translation_language.toUpperCase()}
+                  {(item.transcript_language || '??').toUpperCase()} &rarr;{' '}
+                  {(item.translation_language || '??').toUpperCase()}
                 </p>
                 <div className="dashboard-progress-bar">
                   <div

@@ -33,32 +33,40 @@ export default function AuthModal({ mode: initialMode, onClose }) {
           return;
         }
         const data = await signUp(email, password);
-        // If signup returned a session (auto-confirmed), create profile immediately
+        // If signup returned a session (auto-confirmed / email confirmation
+        // disabled), the user is already logged in — create the profile now
+        // using the fresh token and close the modal instead of telling them to
+        // check their email.
         if (data?.session?.access_token) {
           try {
-            await createProfile(fullName.trim(), userRole);
+            await createProfile(fullName.trim(), userRole, data.session.access_token);
           } catch (profileErr) {
             console.error('Profile creation after signup failed:', profileErr);
           }
+          onClose();
+        } else {
+          // Email confirmation required: stash name+role so we can create the
+          // profile after the confirmation login completes.
+          sessionStorage.setItem('vidioma_pending_profile', JSON.stringify({
+            user_name: fullName.trim(),
+            user_role: userRole,
+          }));
+          setInfo('Check your email to confirm your account, then log in.');
         }
-        // Store name+role in sessionStorage so we can create profile after email confirmation login
-        sessionStorage.setItem('vidioma_pending_profile', JSON.stringify({
-          user_name: fullName.trim(),
-          user_role: userRole,
-        }));
-        setInfo('Check your email to confirm your account, then log in.');
       } else if (mode === 'login') {
-        await logIn(email, password);
-        // Check if there's a pending profile from signup
+        const data = await logIn(email, password);
+        // Apply a pending profile from a prior signup — but only for the SAME
+        // email, so one user's stashed name/role can't attach to a different
+        // account that logs in on this browser next.
         const pending = sessionStorage.getItem('vidioma_pending_profile');
         if (pending) {
           try {
             const { user_name, user_role } = JSON.parse(pending);
-            await createProfile(user_name, user_role);
-            sessionStorage.removeItem('vidioma_pending_profile');
+            await createProfile(user_name, user_role, data?.session?.access_token);
           } catch {
             // Profile may already exist or creation may fail — non-blocking
           }
+          sessionStorage.removeItem('vidioma_pending_profile');
         }
         onClose();
       } else if (mode === 'forgot') {

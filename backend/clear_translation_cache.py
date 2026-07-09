@@ -24,21 +24,14 @@ except Exception as e:
     print("Make sure Redis is running and REDIS_URL is set correctly in .env")
     exit(1)
 
-# Find and delete all translation cache keys
-patterns = [
-    "translate_paragraphs:*",  # v1 keys
-    "translate_paragraphs:v2:*",  # v2 keys
-]
-
+# Delete all translation cache keys. A single glob covers every version prefix
+# (v1, v2, ..., v5, and any future bump) since they all share the
+# "translate_paragraphs:" namespace. SCAN avoids blocking Redis on large keyspaces.
+pattern = "translate_paragraphs:*"
 total_deleted = 0
-for pattern in patterns:
-    keys = client.keys(pattern)
-    if keys:
-        deleted = client.delete(*keys)
-        total_deleted += deleted
-        print(f"[OK] Deleted {deleted} keys matching {pattern}")
-    else:
-        print(f"[OK] No keys found for {pattern}")
+for key in client.scan_iter(match=pattern, count=500):
+    total_deleted += client.delete(key)
+print(f"[OK] Deleted {total_deleted} keys matching {pattern}")
 
 print(f"\n[OK] Total keys deleted: {total_deleted}")
 print("All saved videos will now re-translate with full context on next access.")

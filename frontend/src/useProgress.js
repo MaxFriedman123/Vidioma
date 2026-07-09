@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { useAuth } from './AuthContext';
 
@@ -52,6 +52,11 @@ export function useProgress() {
             .post(`${API_BASE_URL}/api/progress/upsert`, data, {
               headers: { Authorization: `Bearer ${accessToken}` },
             })
+            .then(() => {
+              // Clear only if nothing newer arrived while the request was in
+              // flight — otherwise a later save would be dropped.
+              if (latestPayloadRef.current === data) latestPayloadRef.current = null;
+            })
             .catch((err) => console.error('Progress save failed:', err));
         }, DEBOUNCE_MS);
       }
@@ -59,10 +64,34 @@ export function useProgress() {
     [isAuthenticated, accessToken, _storageKey]
   );
 
+  // If the auth token changes (logout / refresh / account switch), cancel any
+  // pending debounced save so it can't fire against a stale/invalidated token.
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+    };
+  }, [accessToken]);
+
   // ── Load progress (for resume) ────────────────────────────────────
   const loadProgress = useCallback(
     async (youtubeId, transcriptLang, translationLang) => {
-      // Try server first for auth users
+      // Read the local value first — it may be fresher than the server if the
+      // last debounced/flush save didn't reach the backend.
+      let localLine = 0;
+      const key = _storageKey(youtubeId, transcriptLang, translationLang);
+      try {
+        const stored = JSON.parse(localStorage.getItem(key));
+        localLine = stored?.current_line_index || 0;
+      } catch {
+        localLine = 0;
+      }
+
+      // For authenticated users, also consult the server, then resume from
+      // whichever is further along so a failed server save doesn't cost the
+      // user their most recent local progress.
       if (isAuthenticated && accessToken) {
         try {
           const resp = await axios.get(
@@ -76,21 +105,15 @@ export function useProgress() {
             }
           );
           if (resp.data?.progress) {
-            return resp.data.progress.current_line_index || 0;
+            const serverLine = resp.data.progress.current_line_index || 0;
+            return Math.max(serverLine, localLine);
           }
         } catch (err) {
           console.error('Failed to load server progress:', err);
         }
       }
 
-      // Fallback to localStorage
-      const key = _storageKey(youtubeId, transcriptLang, translationLang);
-      try {
-        const stored = JSON.parse(localStorage.getItem(key));
-        return stored?.current_line_index || 0;
-      } catch {
-        return 0;
-      }
+      return localLine;
     },
     [isAuthenticated, accessToken, _storageKey]
   );
@@ -104,6 +127,9 @@ export function useProgress() {
 
     const data = latestPayloadRef.current;
     if (data && isAuthenticated && accessToken) {
+      // Clear the ref up front so a subsequent flush (e.g. unmount right after
+      // pagehide) doesn't re-POST the same payload.
+      latestPayloadRef.current = null;
       // Fire-and-forget
       axios
         .post(`${API_BASE_URL}/api/progress/upsert`, data, {
@@ -112,6 +138,21 @@ export function useProgress() {
         .catch(() => {});
     }
   }, [isAuthenticated, accessToken]);
+
+  // Flush a pending debounced save when the tab is hidden/closed so the last
+  // couple of seconds of progress aren't lost on refresh or navigation.
+  useEffect(() => {
+    const handlePageHide = () => flushProgress();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') flushProgress();
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [flushProgress]);
 
   return { saveProgress, loadProgress, flushProgress };
 }

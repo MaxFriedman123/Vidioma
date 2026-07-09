@@ -9,6 +9,7 @@ from youtube_transcript_api.proxies import GenericProxyConfig
 import re
 import json
 import hashlib
+import hmac
 import string
 import random
 import redis
@@ -102,8 +103,14 @@ def require_auth(f):
             g.user_id = payload["sub"]  # Supabase stores user UUID in 'sub'
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Token has expired"}), 401
-        except jwt.InvalidTokenError as e:
-            return jsonify({"error": f"Invalid token: {e}"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+        except Exception as e:
+            # JWKS lookup failures (unknown/absent kid, transient JWKS outage)
+            # raise PyJWKClientError, which is NOT an InvalidTokenError. Treat
+            # them as auth failures (401) rather than leaking a 500.
+            print(f"Auth verification error: {e}")
+            return jsonify({"error": "Could not verify authentication token"}), 401
 
         return f(*args, **kwargs)
     return decorated
@@ -120,8 +127,10 @@ def optional_auth(f):
             try:
                 payload = _verify_token(token)
                 g.user_id = payload["sub"]
-            except jwt.InvalidTokenError:
-                pass  # guest fallback
+            except Exception:
+                # Any verification failure (invalid token, JWKS lookup error,
+                # transient outage) simply falls back to guest — never a 500.
+                pass
         return f(*args, **kwargs)
     return decorated
 
@@ -137,12 +146,25 @@ def home():
     return "Vidioma Backend is Awake - Proxies Active!"
 
 # Utility function to extract video ID from various YouTube URL formats
+# Handles watch?v=, youtu.be/, /embed/, /v/, /shorts/, and bare 11-char IDs,
+# plus trailing query/fragment params (?t=30, &feature=...).
+_YOUTUBE_ID_RE = re.compile(
+    r'(?:youtu\.be/|/embed/|/v/|/shorts/|watch\?v=|[?&]v=)([0-9A-Za-z_-]{11})'
+)
+_BARE_ID_RE = re.compile(r'^[0-9A-Za-z_-]{11}$')
+
+
 def extract_video_id(url):
-    if 'v=' in url:
-        return url.split('v=')[1].split('&')[0]
-    elif 'youtu.be' in url:
-        return url.split('/')[-1]
-    return url
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    match = _YOUTUBE_ID_RE.search(url)
+    if match:
+        return match.group(1)
+    # Allow callers to pass a bare 11-character video ID directly.
+    if _BARE_ID_RE.match(url):
+        return url
+    return None
 
 @lru_cache(maxsize=100)
 def get_cached_transcript(video_id, from_lang):
@@ -268,7 +290,6 @@ def group_into_paragraphs(fragments):
     paragraphs = []
 
     buf_texts = []
-    buf_start_time = None
     buf_last_end = None
     paragraph_index = 0
 
@@ -304,11 +325,7 @@ def group_into_paragraphs(fragments):
             flush()
             paragraph_index += 1
             buf_texts = []
-            buf_start_time = None
             buf_last_end = None
-
-        if buf_start_time is None:
-            buf_start_time = frag["start"]
 
         buf_texts.append(text)
         buf_last_end = frag["start"] + frag["duration"]
@@ -326,7 +343,6 @@ def group_into_paragraphs(fragments):
             flush()
             paragraph_index += 1
             buf_texts = []
-            buf_start_time = None
             buf_last_end = None
 
     flush()
@@ -708,6 +724,14 @@ def align_lines_to_paragraph(paragraph_translation, line_anchors):
         # Fall back to proportional split so we at least return n chunks.
         return _proportional_word_split(paragraph_translation, line_anchors)
 
+    # The DP below is ~O(n * m^2) in time and O(n * m) in memory. Paragraphs are
+    # capped at _MAX_PARAGRAPH_CHARS server-side, but /api/translate accepts
+    # client-supplied paragraphs/lines directly, so guard against a crafted
+    # oversized input pinning a worker. Fall back to the cheap proportional
+    # split when the DP would be too large.
+    if m > 600 or n > 200 or (n * m) > 20000:
+        return _proportional_word_split(paragraph_translation, line_anchors)
+
     word_tokens = [_tokenize(w) for w in words]  # per-word lowercased tokens
     anchor_sets = [set(_tokenize(a)) for a in line_anchors]
 
@@ -845,42 +869,74 @@ def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source
 
 @app.route('/api/transcript', methods=['POST'])
 def get_transcript():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    video_url = data.get('url')
+    from_lang = data.get('from_lang', 'en')
+
+    if not video_url or not isinstance(video_url, str):
+        return jsonify({"error": "URL is required"}), 400
+    if not isinstance(from_lang, str) or not from_lang.strip():
+        return jsonify({"error": "from_lang must be a language code string"}), 400
+
+    video_id = extract_video_id(video_url)
+    if not video_id:
+        return jsonify({"error": "Could not parse a YouTube video ID from the provided URL"}), 400
+
     try:
-        data = request.get_json()
-        video_url = data.get('url')
-        from_lang = data.get('from_lang', 'en')
-
-        if not video_url:
-            return jsonify({"error": "URL is required"}), 400
-
-        video_id = extract_video_id(video_url)
-
         snippets, paragraphs = get_cached_processed_snippets(video_id, from_lang)
-
-        return jsonify({
-            "video_id": video_id,
-            "snippets": snippets,
-            "paragraphs": paragraphs,
-            "from_lang": from_lang,
-        })
-
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"Error fetching transcript for {video_id}: {e}")
+        return jsonify({
+            "error": "We couldn't fetch a transcript for this video. It may have "
+                     "subtitles disabled, be unavailable, or not offer the requested language.",
+        }), 502
+
+    if not snippets:
+        return jsonify({
+            "error": "No usable subtitles were found for this video in the requested language.",
+        }), 404
+
+    return jsonify({
+        "video_id": video_id,
+        "snippets": snippets,
+        "paragraphs": paragraphs,
+        "from_lang": from_lang,
+    })
 
 
 @app.route('/api/translate', methods=['POST'])
 def translate_text():
-    try:
-        data = request.get_json()
-        paragraphs = data.get('paragraphs')
-        lines_by_paragraph = data.get('lines')  # optional nested list, per paragraph
-        from_lang = data.get('from_lang', 'en')
-        to_lang = data.get('to_lang', 'es')
-        if not paragraphs or not isinstance(paragraphs, list):
-            return jsonify({"error": "paragraphs (list of strings) is required"}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
 
-        want_alignment = isinstance(lines_by_paragraph, list) and len(lines_by_paragraph) == len(paragraphs)
+    paragraphs = data.get('paragraphs')
+    lines_by_paragraph = data.get('lines')  # optional nested list, per paragraph
+    from_lang = data.get('from_lang', 'en')
+    to_lang = data.get('to_lang', 'es')
+
+    if not paragraphs or not isinstance(paragraphs, list):
+        return jsonify({"error": "paragraphs (list of strings) is required"}), 400
+    if not all(isinstance(p, str) for p in paragraphs):
+        return jsonify({"error": "every element of paragraphs must be a string"}), 400
+    if not isinstance(from_lang, str) or not isinstance(to_lang, str):
+        return jsonify({"error": "from_lang and to_lang must be language code strings"}), 400
+
+    # Alignment is only requested when `lines` is a nested list matching the
+    # paragraph count AND each entry is itself a list of strings.
+    want_alignment = (
+        isinstance(lines_by_paragraph, list)
+        and len(lines_by_paragraph) == len(paragraphs)
+        and all(
+            isinstance(group, list) and all(isinstance(ln, str) for ln in group)
+            for group in lines_by_paragraph
+        )
+    )
+
+    try:
 
         cache_key = generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph if want_alignment else None)
         cached = None
@@ -907,7 +963,24 @@ def translate_text():
             translated_paragraphs = translate_paragraphs(paragraphs, to_lang, from_lang)
             payload = {"translated_paragraphs": translated_paragraphs}
 
-        if redis_client:
+        # Don't cache a failed translation. When the whole cascade fails,
+        # translate_paragraphs returns the source text unchanged; caching that
+        # for REDIS_TTL_SECONDS would serve un-translated text for 24h even
+        # after the provider recovers. Skip the write when nothing was
+        # translated (all non-empty paragraphs came back byte-identical).
+        def _looks_untranslated(sources, translations):
+            non_empty = [(s or "").strip() for s in sources if (s or "").strip()]
+            if not non_empty:
+                return False
+            return all(
+                (t or "").strip() == (s or "").strip()
+                for s, t in zip(sources, translations)
+                if (s or "").strip()
+            )
+
+        translation_failed = _looks_untranslated(paragraphs, translated_paragraphs)
+
+        if redis_client and not translation_failed:
             try:
                 redis_client.setex(cache_key, REDIS_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
             except Exception as e:
@@ -918,13 +991,18 @@ def translate_text():
 
     except Exception as e:
         print(f"Translate Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 # ── Progress Endpoints ───────────────────────────────────────────────────
 
+# Bound every Supabase REST call so a slow/hung Supabase can't pin a Flask
+# worker indefinitely. (connect timeout, read timeout)
+SUPABASE_TIMEOUT = (5, 15)
+
+
 def _sb_get(table, params=None):
     """GET from Supabase REST API."""
-    resp = http_requests.get(f"{SUPABASE_REST_URL}/{table}", headers=SUPABASE_HEADERS, params=params or {})
+    resp = http_requests.get(f"{SUPABASE_REST_URL}/{table}", headers=SUPABASE_HEADERS, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase GET {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -932,7 +1010,7 @@ def _sb_get(table, params=None):
 def _sb_post(table, data, extra_headers=None, params=None):
     """POST to Supabase REST API."""
     headers = {**SUPABASE_HEADERS, **(extra_headers or {})}
-    resp = http_requests.post(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {})
+    resp = http_requests.post(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase POST {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -941,7 +1019,7 @@ def _sb_post(table, data, extra_headers=None, params=None):
 def _sb_patch(table, data, params=None):
     """PATCH (update) rows in Supabase REST API."""
     headers = {**SUPABASE_HEADERS}
-    resp = http_requests.patch(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {})
+    resp = http_requests.patch(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase PATCH {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -950,7 +1028,7 @@ def _sb_patch(table, data, params=None):
 def _sb_delete(table, params=None):
     """DELETE rows from Supabase REST API."""
     headers = {**SUPABASE_HEADERS}
-    resp = http_requests.delete(f"{SUPABASE_REST_URL}/{table}", headers=headers, params=params or {})
+    resp = http_requests.delete(f"{SUPABASE_REST_URL}/{table}", headers=headers, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase DELETE {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -975,7 +1053,21 @@ def _ensure_video(youtube_id, title=None, thumbnail_url=None):
         row["title"] = title
     row["thumbnail_url"] = thumbnail_url or f"https://img.youtube.com/vi/{youtube_id}/hqdefault.jpg"
 
-    result = _sb_post("videos", row)
+    try:
+        result = _sb_post("videos", row)
+    except Exception as e:
+        # Concurrent first-view of the same video: two requests both saw no row
+        # and both tried to insert. A UNIQUE(youtube_id) constraint makes the
+        # loser fail — re-read the row the winner created rather than 500.
+        existing = _sb_get("videos", {"select": "id", "youtube_id": f"eq.{youtube_id}"})
+        if existing:
+            return existing[0]["id"]
+        raise e
+
+    if not result:
+        # PATCH/POST returned no representation — fall back to a read.
+        existing = _sb_get("videos", {"select": "id", "youtube_id": f"eq.{youtube_id}"})
+        return existing[0]["id"] if existing else None
     return result[0]["id"]
 
 
@@ -995,7 +1087,7 @@ def get_all_progress():
         return jsonify({"progress": rows})
     except Exception as e:
         print(f"GET /api/progress error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/progress/upsert", methods=["POST"])
@@ -1005,16 +1097,30 @@ def upsert_progress():
     if not supabase_ready:
         return jsonify({"error": "Database not configured"}), 500
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
     youtube_id = data.get("youtube_id")
     transcript_language = data.get("transcript_language")
     translation_language = data.get("translation_language")
-    current_line_index = data.get("current_line_index", 0)
-    total_lines = data.get("total_lines", 0)
     title = data.get("title")
 
     if not youtube_id or not transcript_language or not translation_language:
         return jsonify({"error": "youtube_id, transcript_language, and translation_language are required"}), 400
+
+    # Coerce + clamp the counters so a malformed client can't write negative or
+    # non-integer progress that later renders as impossible percentages.
+    def _non_negative_int(value, default=0):
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return default
+
+    current_line_index = _non_negative_int(data.get("current_line_index", 0))
+    total_lines = _non_negative_int(data.get("total_lines", 0))
+    if total_lines and current_line_index > total_lines:
+        current_line_index = total_lines
 
     try:
         video_id = _ensure_video(youtube_id, title=title)
@@ -1039,7 +1145,7 @@ def upsert_progress():
         return jsonify({"progress": result[0] if result else None})
     except Exception as e:
         print(f"POST /api/progress/upsert error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/progress/<youtube_id>", methods=["GET"])
@@ -1075,7 +1181,7 @@ def get_video_progress(youtube_id):
         return jsonify({"progress": rows[0] if rows else None})
     except Exception as e:
         print(f"GET /api/progress/{youtube_id} error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 # ── User Profile Endpoints ──────────────────────────────────────────────
@@ -1094,7 +1200,7 @@ def get_profile():
         return jsonify({"profile": rows[0] if rows else None})
     except Exception as e:
         print(f"GET /api/profile error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/profile", methods=["POST"])
@@ -1135,7 +1241,7 @@ def create_or_update_profile():
         return jsonify({"profile": result[0] if result else None})
     except Exception as e:
         print(f"POST /api/profile error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/profile/name", methods=["PATCH"])
@@ -1161,7 +1267,7 @@ def update_profile_name():
         return jsonify({"profile": result[0] if result else None})
     except Exception as e:
         print(f"PATCH /api/profile/name error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 # ── Class Endpoints ─────────────────────────────────────────────────────
@@ -1213,7 +1319,7 @@ def create_class():
         return jsonify({"class": result[0] if result else None}), 201
     except Exception as e:
         print(f"POST /api/classes error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/classes", methods=["GET"])
@@ -1249,12 +1355,14 @@ def get_classes():
             for e in enrollments:
                 cls = e.get("classes")
                 if cls and cls.get("is_active"):
+                    # Students must not see the class code (enrollment secret).
+                    cls.pop("class_code", None)
                     cls["joined_at"] = e.get("joined_at")
                     classes.append(cls)
             return jsonify({"classes": classes, "role": "student"})
     except Exception as e:
         print(f"GET /api/classes error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/classes/<class_id>", methods=["GET"])
@@ -1285,6 +1393,10 @@ def get_class_detail(class_id):
             })
             if not enrollment:
                 return jsonify({"error": "Access denied"}), 403
+            # The class code is the enrollment secret — only the teacher who owns
+            # the class should ever see it. `select=*` above pulls it in, so drop
+            # it from the payload for enrolled students.
+            cls.pop("class_code", None)
 
         # Fetch enrolled students
         students = _sb_get("student_classes", {
@@ -1300,7 +1412,7 @@ def get_class_detail(class_id):
         })
     except Exception as e:
         print(f"GET /api/classes/{class_id} error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/classes/join", methods=["POST"])
@@ -1349,7 +1461,7 @@ def join_class():
         return jsonify({"message": f"Successfully joined {cls['class_name']}", "class_id": cls["class_id"]}), 200
     except Exception as e:
         print(f"POST /api/classes/join error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/classes/<class_id>", methods=["DELETE"])
@@ -1373,7 +1485,7 @@ def delete_class(class_id):
         return jsonify({"message": "Class deleted successfully"})
     except Exception as e:
         print(f"DELETE /api/classes/{class_id} error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 @app.route("/api/classes/<class_id>/students/<student_id>", methods=["DELETE"])
@@ -1402,39 +1514,48 @@ def remove_student(class_id, student_id):
         return jsonify({"message": "Student removed from class"})
     except Exception as e:
         print(f"DELETE /api/classes/{class_id}/students/{student_id} error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 # ── Admin Cache Endpoints ────────────────────────────────────────────────
 
+ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "").strip()
+
+
 @app.route('/api/admin/clear-translation-cache', methods=['POST'])
-@optional_auth
 def clear_translation_cache():
     """
-    Clear all translation cache entries. Requires auth token.
-    Useful after a translation method change (e.g. new full-context algorithm).
-    All videos will re-translate with the new method on next access.
+    Clear all translation cache entries. This is an operational/admin action
+    (used after a translation-method change), NOT a per-user action, so it is
+    gated behind a shared ADMIN_API_KEY secret supplied via the
+    `X-Admin-Api-Key` header — not an ordinary user login. If ADMIN_API_KEY is
+    unset the endpoint is disabled entirely.
     """
-    if not g.user_id:
+    if not ADMIN_API_KEY:
+        return jsonify({"error": "Admin endpoint is disabled (ADMIN_API_KEY not configured)"}), 404
+
+    supplied = request.headers.get("X-Admin-Api-Key", "")
+    if not supplied or not hmac.compare_digest(supplied, ADMIN_API_KEY):
         return jsonify({"error": "Unauthorized"}), 401
 
     if not redis_client:
         return jsonify({"error": "Redis not configured"}), 503
 
     try:
-        patterns = ["translate_paragraphs:*", "translate_paragraphs:v5:*"]
+        # A single glob covers every version prefix (v2, v5, …); the previous
+        # second pattern was a strict subset of the first and thus redundant.
+        # KEYS is a blocking O(N) scan — fine for an occasional admin flush,
+        # but use SCAN so we don't stall Redis on large keyspaces.
         total_deleted = 0
-        for pattern in patterns:
-            keys = redis_client.keys(pattern)
-            if keys:
-                total_deleted += redis_client.delete(*keys)
+        for key in redis_client.scan_iter(match="translate_paragraphs:*", count=500):
+            total_deleted += redis_client.delete(key)
         return jsonify({
             "message": f"Cleared {total_deleted} translation cache entries",
             "entries_deleted": total_deleted,
         })
     except Exception as e:
         print(f"Clear cache error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Failed to clear cache"}), 500
 
 
 if __name__ == '__main__':
