@@ -2142,3 +2142,153 @@
     letter-spacing: 1px;
   }
 }
+
+/* ---------------------------------------------------
+   ASSIGNMENTS
+--------------------------------------------------- */
+/* Create dropdown (replaces the single Create Class button) */
+.create-dropdown {
+  position: relative;
+  display: inline-block;
+}
+.create-dropdown-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  background: #1c2230;
+  border: 1px solid #313a4d;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  overflow: hidden;
+  z-index: 30;
+  min-width: 160px;
+}
+.create-dropdown-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 16px;
+  background: none;
+  border: none;
+  color: #e6ecf5;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.create-dropdown-item:hover { background: #262f42; }
+
+/* Assignment creation form */
+.assignment-form { max-width: 640px; margin: 0 auto; text-align: left; }
+.assignment-label {
+  display: block;
+  margin: 16px 0 6px;
+  color: #9fb0c8;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.assignment-lang-row { display: flex; gap: 16px; }
+.assignment-lang-row > div { flex: 1; }
+.assignment-targets { display: flex; flex-direction: column; gap: 10px; }
+.assignment-target-class {
+  border: 1px solid #313a4d;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #161c28;
+}
+.assignment-target-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.assignment-target-name { font-weight: 600; color: #e6ecf5; }
+.assignment-target-modes { display: flex; gap: 6px; }
+.assignment-mode-btn {
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid #313a4d;
+  background: #1c2230;
+  color: #9fb0c8;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.assignment-mode-btn.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: #fff;
+}
+.assignment-roster {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #262f42;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.assignment-student-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #cbd5e6;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+/* Assignment list inside a class */
+.assignment-list { display: flex; flex-direction: column; gap: 8px; }
+.assignment-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #313a4d;
+  border-radius: 10px;
+  background: #161c28;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.assignment-list-item:hover { background: #1c2432; }
+.assignment-list-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.assignment-list-title { font-weight: 600; color: #e6ecf5; }
+.assignment-list-langs { font-size: 0.8rem; color: #8ea1bd; }
+.assignment-list-meta { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.assignment-list-due { font-size: 0.8rem; color: #9fb0c8; }
+.assignment-list-stat { font-size: 0.85rem; color: #a8e6cf; }
+.assignment-list-btn { padding: 6px 14px; font-size: 0.85rem; }
+.assignment-due-overdue { color: #ff8a8a !important; }
+
+/* Assignment status badges */
+.assignment-status-complete { color: #a8e6cf; font-weight: 600; }
+.assignment-status-progress { color: #ffd479; }
+.assignment-status-notstarted { color: #8ea1bd; }
+.assignment-student-progress { flex: 1; gap: 4px; }
+.assignment-detail-thumb { width: 160px; border-radius: 10px; }
+.assignment-student-actions { display: flex; flex-direction: column; gap: 12px; max-width: 420px; }
+
+/* Assignment banner in the player (no-skip mode) */
+.assignment-player-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: linear-gradient(90deg, #1e3a5f, #16233a);
+  border: 1px solid #2c4a6e;
+  border-radius: 10px;
+  padding: 10px 16px;
+  margin: 0 auto 12px;
+  max-width: 680px;
+}
+.assignment-player-tag {
+  background: #3b82f6;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+.assignment-player-title { font-weight: 600; color: #e6ecf5; }
+.assignment-player-due { color: #ffd479; font-size: 0.85rem; }
+.assignment-player-note { color: #8ea1bd; font-size: 0.82rem; }

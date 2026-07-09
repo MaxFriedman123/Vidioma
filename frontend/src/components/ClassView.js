@@ -4,7 +4,7 @@ import { useAuth } from '../AuthContext';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
-export default function ClassView({ classId, onBack }) {
+export default function ClassView({ classId, onBack, onStartAssignment, onOpenAssignment }) {
   const { accessToken, user } = useAuth();
   const [classData, setClassData] = useState(null);
   const [students, setStudents] = useState([]);
@@ -12,6 +12,9 @@ export default function ClassView({ classId, onBack }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [codeCopied, setCodeCopied] = useState(false);
+
+  // Assignments scoped to this class.
+  const [assignments, setAssignments] = useState([]);
 
   // Confirm dialog state
   const [confirmAction, setConfirmAction] = useState(null); // { type, studentId, studentName }
@@ -35,8 +38,25 @@ export default function ClassView({ classId, onBack }) {
       .finally(() => setLoading(false));
   };
 
+  const fetchAssignments = () => {
+    if (!accessToken || !classId) return;
+    axios
+      .get(`${API_BASE_URL}/api/assignments`, {
+        params: { class_id: classId },
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      .then((resp) => {
+        // Teachers get all their assignments (unfiltered by class server-side);
+        // narrow to ones targeting this class is best-effort on the student side
+        // where the server already scopes by class_id.
+        setAssignments(resp.data.assignments || []);
+      })
+      .catch(() => setAssignments([]));
+  };
+
   useEffect(() => {
     fetchClassDetail();
+    fetchAssignments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, classId]);
 
@@ -168,6 +188,63 @@ export default function ClassView({ classId, onBack }) {
             <button className="class-code-copy-btn" onClick={handleCopyCode}>
               {codeCopied ? 'Copied!' : 'Copy Code'}
             </button>
+          </div>
+        )}
+      </div>
+
+      {/* Assignments */}
+      <div className="class-section">
+        <h3 className="class-section-title">Assignments ({assignments.length})</h3>
+        {assignments.length === 0 ? (
+          <p className="class-empty-students">
+            {isTeacher ? 'No assignments yet. Use Create → Assignment to add one.' : 'No assignments yet.'}
+          </p>
+        ) : (
+          <div className="assignment-list">
+            {assignments.map((a) => {
+              const title = a.title || a.videos?.title || 'Assignment';
+              const due = a.due_date ? new Date(a.due_date) : null;
+              const overdue = due && due < new Date();
+              // Student progress badge
+              const prog = a.progress;
+              const pct = prog && prog.total_lines > 0
+                ? Math.round((prog.current_line_index / prog.total_lines) * 100) : 0;
+              return (
+                <div
+                  key={a.assignment_id}
+                  className="assignment-list-item"
+                  onClick={() => onOpenAssignment && onOpenAssignment(a.assignment_id)}
+                >
+                  <div className="assignment-list-main">
+                    <span className="assignment-list-title">{title}</span>
+                    <span className="assignment-list-langs">
+                      {(a.transcript_language || 'en').toUpperCase()} → {(a.translation_language || 'es').toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="assignment-list-meta">
+                    {due && (
+                      <span className={`assignment-list-due ${overdue ? 'assignment-due-overdue' : ''}`}>
+                        Due {due.toLocaleDateString()}
+                      </span>
+                    )}
+                    {isTeacher ? (
+                      <span className="assignment-list-stat">
+                        {a.completed_count}/{a.assigned_count} done
+                      </span>
+                    ) : prog?.completed ? (
+                      <span className="assignment-status-complete">✓ Done</span>
+                    ) : (
+                      <button
+                        className="class-action-btn assignment-list-btn"
+                        onClick={(e) => { e.stopPropagation(); if (onStartAssignment) onStartAssignment(a); }}
+                      >
+                        {prog && prog.current_line_index > 0 ? `Continue (${pct}%)` : 'Start'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

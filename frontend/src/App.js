@@ -10,6 +10,8 @@ import Dashboard from './components/Dashboard';
 import NamePromptModal from './components/NamePromptModal';
 import ClassDashboard from './components/ClassDashboard';
 import ClassView from './components/ClassView';
+import CreateAssignment from './components/CreateAssignment';
+import AssignmentDetail from './components/AssignmentDetail';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
@@ -224,16 +226,27 @@ const getBestWindowSimilarity = (userInput, paragraphTranslation, sourceLine) =>
 };
 
 function App() {
-  const { isAuthenticated, loading: authLoading, passwordRecoveryPending, clearPasswordRecovery, userProfile, profileLoading } = useAuth();
+  const { isAuthenticated, loading: authLoading, passwordRecoveryPending, clearPasswordRecovery, userProfile, profileLoading, accessToken } = useAuth();
   const { saveProgress, loadProgress, flushProgress } = useProgress();
+  // Mirror the access token into a ref so fire-and-forget assignment saves in
+  // callbacks/intervals always use the current token without re-subscribing.
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
 
-  // ── View state: 'home' | 'player' | 'dashboard' | 'classes' | 'classDetail' ──
+  // ── View state: 'home' | 'player' | 'dashboard' | 'classes' | 'classDetail' | 'createAssignment' | 'assignmentDetail' ──
   const [view, setView] = useState('home');
   const [dashboardKey, setDashboardKey] = useState(0);
   const [selectedClassId, setSelectedClassId] = useState(null);
+  const [selectedAssignmentId, setSelectedAssignmentId] = useState(null);
   const [classesKey, setClassesKey] = useState(0);
   const [authModalMode, setAuthModalMode] = useState(null); // null | 'login' | 'signup'
   const [guestBannerDismissed, setGuestBannerDismissed] = useState(false);
+
+  // Assignment playback: when a student launches an assignment, the player runs
+  // in "assignment mode" — progress is saved to the assignment (not the personal
+  // dashboard) and the student cannot skip ahead of their furthest-reached line.
+  const activeAssignmentRef = useRef(null); // { assignmentId, maxLineReached } or null
+  const [assignmentBanner, setAssignmentBanner] = useState(null); // { title, dueDate } shown in player
 
   const [loadingText, setLoadingText] = useState("Extracting audio...");
   const [isLoading, setIsLoading] = useState(false);
@@ -588,6 +601,69 @@ function App() {
     }
   };
 
+  // ── Launch an assignment into the player (student, no-skip mode) ──────
+  const handleStartAssignment = async (assignment) => {
+    const youtubeId = assignment.youtube_id || assignment.videos?.youtube_id;
+    if (!youtubeId) return;
+    const requestUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
+    const tLang = assignment.transcript_language || 'en';
+    const trLang = assignment.translation_language || 'es';
+
+    setFromLang(tLang);
+    setToLang(trLang);
+    // Mark assignment mode BEFORE the session begins so save/skip logic applies.
+    const startedMax = assignment.progress?.max_line_reached ?? 0;
+    activeAssignmentRef.current = { assignmentId: assignment.assignment_id, maxLineReached: startedMax };
+    setAssignmentBanner({
+      title: assignment.title || assignment.videos?.title || 'Assignment',
+      dueDate: assignment.due_date || null,
+    });
+
+    const sessionId = beginPlayerSession({
+      nextUrl: requestUrl,
+      nextVideoId: youtubeId,
+      launchSource: 'assignment',
+    });
+    const controller = new AbortController();
+    transcriptRequestControllerRef.current = controller;
+
+    try {
+      const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
+        url: requestUrl, from_lang: tLang, to_lang: trLang,
+      }, { signal: controller.signal });
+      if (activePlayerSessionRef.current !== sessionId) return;
+
+      const snippets = response.data.snippets;
+      setTranscript(snippets);
+      setParagraphs(response.data.paragraphs || []);
+      // Resume from the assignment's own saved progress (not personal progress).
+      const resume = assignment.progress?.current_line_index ?? 0;
+      const safeStart = (resume > 0 && resume < snippets.length) ? resume : 0;
+      setCurrentLineIndex(safeStart);
+    } catch (error) {
+      if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) return;
+      console.error('Assignment load error:', error);
+      setLoadError(error?.response?.data?.error || "We couldn't load this assignment. Please try again.");
+    } finally {
+      if (transcriptRequestControllerRef.current === controller) transcriptRequestControllerRef.current = null;
+      if (activePlayerSessionRef.current === sessionId) setIsLoading(false);
+    }
+  };
+
+  // Persist progress for the active assignment (kept out of the personal
+  // dashboard). Also advances the local no-skip ceiling.
+  const saveAssignmentProgress = useCallback((lineIndex, totalLines) => {
+    const active = activeAssignmentRef.current;
+    if (!active) return;
+    if (lineIndex > active.maxLineReached) active.maxLineReached = lineIndex;
+    if (!accessTokenRef.current) return;
+    axios.post(`${API_BASE_URL}/api/assignments/${active.assignmentId}/progress`, {
+      current_line_index: lineIndex,
+      total_lines: totalLines,
+    }, { headers: { Authorization: `Bearer ${accessTokenRef.current}` } })
+      .catch((err) => console.error('Assignment progress save failed:', err));
+  }, []);
+
   // ---------------------------------------------------------
   // Reset all player/transcript state to defaults
   // ---------------------------------------------------------
@@ -623,11 +699,20 @@ function App() {
     setNeedsManualPlay(false);
     setPlaybackLaunchSource('home');
     dashboardStartPromptActiveRef.current = false;
+    activeAssignmentRef.current = null;
+    setAssignmentBanner(null);
   }, [player, flushProgress, clearPlaybackAttemptTimers, cancelActivePlayerRequests]);
 
   const handleBack = () => {
+    // Capture assignment context before reset clears it, so we can return the
+    // student to where they launched from (assignment detail or their classes).
+    const wasAssignment = !!activeAssignmentRef.current;
     resetPlayerState();
-    setView('home');
+    if (wasAssignment) {
+      setView(selectedAssignmentId ? 'assignmentDetail' : 'classes');
+    } else {
+      setView('home');
+    }
   };
 
   const handleManualPlay = () => {
@@ -784,6 +869,26 @@ function App() {
             actualIndex = 0;
           }
 
+          // NO-SKIP (assignment mode): the student may rewind freely but may not
+          // jump PAST the furthest line they've legitimately reached. If they
+          // seek ahead, snap the video and UI back to that ceiling.
+          const active = activeAssignmentRef.current;
+          if (active && actualIndex !== -1 && actualIndex > active.maxLineReached) {
+            const capIndex = Math.min(active.maxLineReached, transcript.length - 1);
+            const capLine = transcript[capIndex];
+            if (capLine && typeof player.seekTo === 'function') {
+              try { player.seekTo(capLine.start, true); } catch (_) {}
+            }
+            lastTimeRef.current = capLine ? capLine.start : currentTime;
+            if (capIndex !== currentLineIndex) {
+              setCurrentLineIndex(capIndex);
+              setShowInput(false);
+              setUserInput('');
+              setAnswered(false);
+            }
+            return; // ignore the forward seek entirely
+          }
+
           // If they jumped to a completely different line, resync the UI!
           if (actualIndex !== -1 && actualIndex !== currentLineIndex) {
             setCurrentLineIndex(actualIndex);
@@ -846,30 +951,39 @@ function App() {
         setAnswered(false);    // Reset answered state
         player.playVideo();     // Resume Video
 
-        // Save progress after advancing
-        const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
-        saveProgress({
-          youtube_id: videoId,
-          transcript_language: fromLang,
-          translation_language: toLang,
-          current_line_index: nextIndex,
-          total_lines: transcript.length,
-          title: videoTitle,
-        });
+        // Save progress after advancing. Assignment mode saves to the assignment
+        // (never the personal dashboard); otherwise the normal dashboard path.
+        if (activeAssignmentRef.current) {
+          saveAssignmentProgress(nextIndex, transcript.length);
+        } else {
+          const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
+          saveProgress({
+            youtube_id: videoId,
+            transcript_language: fromLang,
+            translation_language: toLang,
+            current_line_index: nextIndex,
+            total_lines: transcript.length,
+            title: videoTitle,
+          });
+        }
       } else {
         setIsFinished(true); // Mark the video as finished
         player.pauseVideo(); // Just to be safe, ensure the video is paused at the end
 
-        // Save final progress
-        const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
-        saveProgress({
-          youtube_id: videoId,
-          transcript_language: fromLang,
-          translation_language: toLang,
-          current_line_index: transcript.length,
-          total_lines: transcript.length,
-          title: videoTitle,
-        });
+        // Save final progress (marks the assignment complete on the server).
+        if (activeAssignmentRef.current) {
+          saveAssignmentProgress(transcript.length, transcript.length);
+        } else {
+          const videoTitle = typeof player.getVideoData === 'function' ? player.getVideoData().title : undefined;
+          saveProgress({
+            youtube_id: videoId,
+            transcript_language: fromLang,
+            translation_language: toLang,
+            current_line_index: transcript.length,
+            total_lines: transcript.length,
+            title: videoTitle,
+          });
+        }
       }
     } else {
       const currentLine = transcript[currentLineIndex];
@@ -887,7 +1001,7 @@ function App() {
         setIsError(true); // Mark as error to show red border
       }
     }
-  }, [answered, currentLineIndex, transcript, player, userInput, translatedParagraphs, videoId, fromLang, toLang, saveProgress]);
+  }, [answered, currentLineIndex, transcript, player, userInput, translatedParagraphs, videoId, fromLang, toLang, saveProgress, saveAssignmentProgress]);
 
   const handleInputSubmit = (e) => {
     if (e.key === 'Enter') {
@@ -1079,6 +1193,7 @@ function App() {
           <ClassDashboard
             key={classesKey}
             onSelectClass={(classId) => { setSelectedClassId(classId); setView('classDetail'); }}
+            onCreateAssignment={() => setView('createAssignment')}
           />
         )}
 
@@ -1087,6 +1202,25 @@ function App() {
           <ClassView
             classId={selectedClassId}
             onBack={() => { setClassesKey(k => k + 1); setView('classes'); }}
+            onStartAssignment={handleStartAssignment}
+            onOpenAssignment={(assignmentId) => { setSelectedAssignmentId(assignmentId); setView('assignmentDetail'); }}
+          />
+        )}
+
+        {/* ── CREATE ASSIGNMENT VIEW (teacher) ───────────────── */}
+        {view === 'createAssignment' && isAuthenticated && (
+          <CreateAssignment
+            onBack={() => setView('classes')}
+            onCreated={() => { setClassesKey(k => k + 1); setView('classes'); }}
+          />
+        )}
+
+        {/* ── ASSIGNMENT DETAIL VIEW ─────────────────────────── */}
+        {view === 'assignmentDetail' && isAuthenticated && selectedAssignmentId && (
+          <AssignmentDetail
+            assignmentId={selectedAssignmentId}
+            onBack={() => { if (selectedClassId) { setView('classDetail'); } else { setView('classes'); } }}
+            onStartAssignment={handleStartAssignment}
           />
         )}
 
@@ -1150,8 +1284,21 @@ function App() {
               <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                 <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
               </svg>
-              Back to Search
+              {assignmentBanner ? 'Back to Assignments' : 'Back to Search'}
             </button>
+            {/* Assignment banner — signals no-skip mode + shows the due date */}
+            {assignmentBanner && (
+              <div className="assignment-player-banner">
+                <span className="assignment-player-tag">Assignment</span>
+                <span className="assignment-player-title">{assignmentBanner.title}</span>
+                {assignmentBanner.dueDate && (
+                  <span className="assignment-player-due">
+                    Due {new Date(assignmentBanner.dueDate).toLocaleDateString()}
+                  </span>
+                )}
+                <span className="assignment-player-note">Complete every line — you can't skip ahead.</span>
+              </div>
+            )}
             <div className="content-area">
               {/* Video Player */}
               <div className="video-section">

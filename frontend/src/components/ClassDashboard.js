@@ -4,8 +4,9 @@ import { useAuth } from '../AuthContext';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
-export default function ClassDashboard({ onSelectClass }) {
+export default function ClassDashboard({ onSelectClass, onCreateAssignment }) {
   const { accessToken, userProfile } = useAuth();
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [classes, setClasses] = useState(() => {
     try {
       const cached = localStorage.getItem('vidioma_classes_cache');
@@ -152,9 +153,32 @@ export default function ClassDashboard({ onSelectClass }) {
       <div className="class-dashboard-header">
         <h2 className="dashboard-title">My Classes</h2>
         {isTeacher ? (
-          <button className="class-action-btn" onClick={() => setShowCreateModal(true)}>
-            + Create Class
-          </button>
+          <div className="create-dropdown" onMouseLeave={() => setCreateMenuOpen(false)}>
+            <button
+              className="class-action-btn"
+              onClick={() => setCreateMenuOpen((o) => !o)}
+              aria-haspopup="true"
+              aria-expanded={createMenuOpen}
+            >
+              + Create ▾
+            </button>
+            {createMenuOpen && (
+              <div className="create-dropdown-menu">
+                <button
+                  className="create-dropdown-item"
+                  onClick={() => { setCreateMenuOpen(false); if (onCreateAssignment) onCreateAssignment(); }}
+                >
+                  Assignment
+                </button>
+                <button
+                  className="create-dropdown-item"
+                  onClick={() => { setCreateMenuOpen(false); setShowCreateModal(true); }}
+                >
+                  Class
+                </button>
+              </div>
+            )}
+          </div>
         ) : (
           <button className="class-action-btn" onClick={() => setShowJoinModal(true)}>
             + Join Class

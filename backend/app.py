@@ -1800,6 +1800,378 @@ def remove_student(class_id, student_id):
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
+# ── Assignment Endpoints ─────────────────────────────────────────────────
+# Teachers assign a YouTube video to whole classes and/or individual students,
+# with an optional due date. Students see their assignments per class, resume
+# where they left off, and must complete the video linearly (no skipping).
+# Assignment progress is tracked separately from user_progress so it never
+# shows up in the personal dashboard.
+
+def _get_role(user_id):
+    profile = _sb_get("user_profiles", {"select": "user_role", "user_id": f"eq.{user_id}"})
+    return profile[0].get("user_role") if profile else None
+
+
+def _teacher_owns_class(class_id, teacher_id):
+    rows = _sb_get("classes", {"select": "class_id", "class_id": f"eq.{class_id}", "teacher_id": f"eq.{teacher_id}"})
+    return bool(rows)
+
+
+def _assignment_student_ids(assignment_id):
+    """Expand an assignment's targets into the concrete set of student ids.
+    Whole-class targets expand to the class's current roster (so students who
+    join later still get class-wide assignments); individual targets add just
+    that student. Returns a set of user-id strings.
+    """
+    targets = _sb_get("assignment_targets", {
+        "select": "class_id, student_id",
+        "assignment_id": f"eq.{assignment_id}",
+    })
+    student_ids = set()
+    class_wide = set()
+    for t in targets:
+        if t.get("student_id"):
+            student_ids.add(t["student_id"])
+        else:
+            class_wide.add(t["class_id"])
+    for class_id in class_wide:
+        roster = _sb_get("student_classes", {"select": "student_id", "class_id": f"eq.{class_id}"})
+        for r in roster:
+            if r.get("student_id"):
+                student_ids.add(r["student_id"])
+    return student_ids
+
+
+def _student_sees_assignment(assignment_id, student_id):
+    return student_id in _assignment_student_ids(assignment_id)
+
+
+@app.route("/api/assignments", methods=["POST"])
+@require_auth
+def create_assignment():
+    """Create an assignment (teacher only).
+
+    Body:
+      url                 (required) YouTube URL or video id
+      title               (optional) label; falls back to youtube id
+      transcript_language / translation_language (optional, default en/es)
+      instructions        (optional)
+      due_date            (optional ISO8601 string)
+      class_ids           (optional list) whole classes to assign to
+      student_targets     (optional list of {class_id, student_id}) individual
+                          students within a class
+    At least one of class_ids / student_targets is required. Every referenced
+    class must be owned by the requesting teacher.
+    """
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    if _get_role(g.user_id) != "teacher":
+        return jsonify({"error": "Only teachers can create assignments"}), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    url = data.get("url")
+    if not url or not isinstance(url, str):
+        return jsonify({"error": "A YouTube URL is required"}), 400
+    youtube_id = extract_video_id(url)
+    if not youtube_id:
+        return jsonify({"error": "Could not parse a YouTube video ID from the provided URL"}), 400
+
+    transcript_language = (data.get("transcript_language") or "en").strip() or "en"
+    translation_language = (data.get("translation_language") or "es").strip() or "es"
+    instructions = (data.get("instructions") or "").strip() or None
+    title = (data.get("title") or "").strip() or None
+    due_date = (data.get("due_date") or "").strip() or None
+
+    class_ids = data.get("class_ids") or []
+    student_targets = data.get("student_targets") or []
+    if not isinstance(class_ids, list) or not isinstance(student_targets, list):
+        return jsonify({"error": "class_ids and student_targets must be lists"}), 400
+    if not class_ids and not student_targets:
+        return jsonify({"error": "Select at least one class or student to assign to"}), 400
+
+    try:
+        # Authorize every referenced class against the requesting teacher.
+        referenced_classes = set(str(c) for c in class_ids)
+        for st in student_targets:
+            if not isinstance(st, dict) or not st.get("class_id") or not st.get("student_id"):
+                return jsonify({"error": "Each student target needs a class_id and student_id"}), 400
+            referenced_classes.add(str(st["class_id"]))
+        for class_id in referenced_classes:
+            if not _teacher_owns_class(class_id, g.user_id):
+                return jsonify({"error": "You can only assign to your own classes"}), 403
+
+        video_id = _ensure_video(youtube_id, title=title)
+        if not video_id:
+            return jsonify({"error": "Failed to resolve video"}), 500
+
+        assignment = _sb_post("assignments", {
+            "teacher_id": g.user_id,
+            "video_id": video_id,
+            "youtube_id": youtube_id,
+            "title": title,
+            "transcript_language": transcript_language,
+            "translation_language": translation_language,
+            "instructions": instructions,
+            "due_date": due_date,
+            "is_active": True,
+        })
+        assignment_id = assignment[0]["assignment_id"]
+
+        # Build target rows: whole classes + individual students.
+        target_rows = [{"assignment_id": assignment_id, "class_id": str(c)} for c in class_ids]
+        for st in student_targets:
+            target_rows.append({
+                "assignment_id": assignment_id,
+                "class_id": str(st["class_id"]),
+                "student_id": str(st["student_id"]),
+            })
+        if target_rows:
+            _sb_post("assignment_targets", target_rows)
+
+        return jsonify({"assignment": assignment[0]}), 201
+    except Exception as e:
+        print(f"POST /api/assignments error: {e}")
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
+
+
+@app.route("/api/assignments", methods=["GET"])
+@require_auth
+def list_assignments():
+    """List assignments for the caller.
+
+    Teachers: assignments they created (with target + completion counts).
+    Students: assignments targeted at them, with their own progress. Optional
+    ?class_id= filters to a single class.
+    """
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    role = _get_role(g.user_id)
+    class_filter = request.args.get("class_id")
+
+    try:
+        if role == "teacher":
+            params = {
+                "select": "*, videos(youtube_id, title, thumbnail_url)",
+                "teacher_id": f"eq.{g.user_id}",
+                "is_active": "eq.true",
+                "order": "created_at.desc",
+            }
+            assignments = _sb_get("assignments", params)
+            result = []
+            for a in assignments:
+                targeted = _assignment_student_ids(a["assignment_id"])
+                prog = _sb_get("assignment_progress", {
+                    "select": "student_id, completed",
+                    "assignment_id": f"eq.{a['assignment_id']}",
+                })
+                completed = sum(1 for p in prog if p.get("completed"))
+                a["assigned_count"] = len(targeted)
+                a["completed_count"] = completed
+                a["started_count"] = len(prog)
+                result.append(a)
+            return jsonify({"assignments": result, "role": "teacher"})
+
+        # Student view: find assignments they're a target of.
+        # Gather assignment ids from individual targets + their classes.
+        enrollments = _sb_get("student_classes", {"select": "class_id", "student_id": f"eq.{g.user_id}"})
+        my_class_ids = {e["class_id"] for e in enrollments}
+
+        direct = _sb_get("assignment_targets", {"select": "assignment_id, class_id", "student_id": f"eq.{g.user_id}"})
+        assignment_ids = {t["assignment_id"] for t in direct}
+        assignment_class = {t["assignment_id"]: t["class_id"] for t in direct}
+
+        if my_class_ids:
+            in_list = ",".join(my_class_ids)
+            class_targets = _sb_get("assignment_targets", {
+                "select": "assignment_id, class_id, student_id",
+                "class_id": f"in.({in_list})",
+            })
+            for t in class_targets:
+                if t.get("student_id"):
+                    continue  # individual target handled above
+                assignment_ids.add(t["assignment_id"])
+                assignment_class.setdefault(t["assignment_id"], t["class_id"])
+
+        if not assignment_ids:
+            return jsonify({"assignments": [], "role": "student"})
+
+        in_ids = ",".join(assignment_ids)
+        assignments = _sb_get("assignments", {
+            "select": "*, videos(youtube_id, title, thumbnail_url), user_profiles!assignments_teacher_id_fkey(user_name)",
+            "assignment_id": f"in.({in_ids})",
+            "is_active": "eq.true",
+            "order": "due_date.asc.nullslast",
+        })
+
+        # Attach this student's progress.
+        my_prog = _sb_get("assignment_progress", {
+            "select": "*",
+            "student_id": f"eq.{g.user_id}",
+            "assignment_id": f"in.({in_ids})",
+        })
+        prog_by_assignment = {p["assignment_id"]: p for p in my_prog}
+
+        result = []
+        for a in assignments:
+            aid = a["assignment_id"]
+            cls_id = assignment_class.get(aid)
+            if class_filter and cls_id != class_filter:
+                continue
+            a["class_id"] = cls_id
+            a["progress"] = prog_by_assignment.get(aid)
+            result.append(a)
+        return jsonify({"assignments": result, "role": "student"})
+    except Exception as e:
+        print(f"GET /api/assignments error: {e}")
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
+
+
+@app.route("/api/assignments/<assignment_id>", methods=["GET"])
+@require_auth
+def get_assignment_detail(assignment_id):
+    """Assignment detail. Teacher (owner) sees per-student completion; a
+    targeted student sees the assignment plus their own progress."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        rows = _sb_get("assignments", {
+            "select": "*, videos(youtube_id, title, thumbnail_url), user_profiles!assignments_teacher_id_fkey(user_name)",
+            "assignment_id": f"eq.{assignment_id}",
+        })
+        if not rows:
+            return jsonify({"error": "Assignment not found"}), 404
+        assignment = rows[0]
+        is_teacher = assignment["teacher_id"] == g.user_id
+
+        if is_teacher:
+            student_ids = _assignment_student_ids(assignment_id)
+            prog = _sb_get("assignment_progress", {"select": "*", "assignment_id": f"eq.{assignment_id}"})
+            prog_by_student = {p["student_id"]: p for p in prog}
+            students = []
+            if student_ids:
+                in_ids = ",".join(student_ids)
+                profiles = _sb_get("user_profiles", {"select": "user_id, user_name", "user_id": f"in.({in_ids})"})
+                name_by_id = {p["user_id"]: p.get("user_name") for p in profiles}
+                for sid in student_ids:
+                    p = prog_by_student.get(sid)
+                    students.append({
+                        "student_id": sid,
+                        "user_name": name_by_id.get(sid) or "Student",
+                        "completed": bool(p and p.get("completed")),
+                        "current_line_index": (p or {}).get("current_line_index", 0),
+                        "total_lines": (p or {}).get("total_lines", 0),
+                        "started": p is not None,
+                    })
+            students.sort(key=lambda s: s["user_name"].lower())
+            return jsonify({"assignment": assignment, "students": students, "is_teacher": True})
+
+        # Student: must be a target.
+        if not _student_sees_assignment(assignment_id, g.user_id):
+            return jsonify({"error": "Access denied"}), 403
+        prog = _sb_get("assignment_progress", {
+            "select": "*", "assignment_id": f"eq.{assignment_id}", "student_id": f"eq.{g.user_id}",
+        })
+        assignment["progress"] = prog[0] if prog else None
+        return jsonify({"assignment": assignment, "is_teacher": False})
+    except Exception as e:
+        print(f"GET /api/assignments/{assignment_id} error: {e}")
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
+
+
+@app.route("/api/assignments/<assignment_id>", methods=["DELETE"])
+@require_auth
+def delete_assignment(assignment_id):
+    """Delete an assignment (owning teacher only)."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        rows = _sb_get("assignments", {"select": "assignment_id, teacher_id", "assignment_id": f"eq.{assignment_id}"})
+        if not rows:
+            return jsonify({"error": "Assignment not found"}), 404
+        if rows[0]["teacher_id"] != g.user_id:
+            return jsonify({"error": "Only the assigning teacher can delete this assignment"}), 403
+
+        _sb_delete("assignment_targets", {"assignment_id": f"eq.{assignment_id}"})
+        _sb_delete("assignment_progress", {"assignment_id": f"eq.{assignment_id}"})
+        _sb_delete("assignments", {"assignment_id": f"eq.{assignment_id}"})
+        return jsonify({"message": "Assignment deleted"})
+    except Exception as e:
+        print(f"DELETE /api/assignments/{assignment_id} error: {e}")
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
+
+
+@app.route("/api/assignments/<assignment_id>/progress", methods=["POST"])
+@require_auth
+def upsert_assignment_progress(assignment_id):
+    """Save a student's progress on an assignment. Enforces no-skip: the stored
+    max_line_reached only ever advances by the allowed step, and completion is
+    only accepted once the last line is reached."""
+    if not supabase_ready:
+        return jsonify({"error": "Database not configured"}), 500
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    if not _student_sees_assignment(assignment_id, g.user_id):
+        return jsonify({"error": "Access denied"}), 403
+
+    def _nn_int(v, default=0):
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return default
+
+    incoming_line = _nn_int(data.get("current_line_index", 0))
+    total_lines = _nn_int(data.get("total_lines", 0))
+
+    try:
+        existing = _sb_get("assignment_progress", {
+            "select": "*", "assignment_id": f"eq.{assignment_id}", "student_id": f"eq.{g.user_id}",
+        })
+        prev = existing[0] if existing else None
+        prev_max = prev.get("max_line_reached", 0) if prev else 0
+
+        if total_lines and incoming_line > total_lines:
+            incoming_line = total_lines
+
+        # No-skip: a student may only be as far as one line past their previous
+        # furthest point. This prevents jumping ahead via crafted requests.
+        allowed_max = prev_max + 1
+        new_max = min(max(prev_max, incoming_line), allowed_max) if prev else min(incoming_line, 1)
+        new_max = max(new_max, prev_max)
+        current_line = min(incoming_line, new_max)
+
+        completed = bool(total_lines) and current_line >= total_lines
+        row = {
+            "assignment_id": assignment_id,
+            "student_id": g.user_id,
+            "current_line_index": current_line,
+            "max_line_reached": new_max,
+            "total_lines": total_lines or (prev.get("total_lines", 0) if prev else 0),
+            "completed": completed or (prev.get("completed", False) if prev else False),
+            "last_accessed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if completed and not (prev and prev.get("completed")):
+            row["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+        result = _sb_post("assignment_progress", row,
+            extra_headers={"Prefer": "return=representation,resolution=merge-duplicates"},
+            params={"on_conflict": "assignment_id,student_id"},
+        )
+        return jsonify({"progress": result[0] if result else None})
+    except Exception as e:
+        print(f"POST /api/assignments/{assignment_id}/progress error: {e}")
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
+
+
 # ── Admin Cache Endpoints ────────────────────────────────────────────────
 
 ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "").strip()
