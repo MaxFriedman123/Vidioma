@@ -433,16 +433,20 @@
 
 .content-area {
   display: flex;
-  flex-direction: row; /* Stack video on top of text */
+  flex-direction: row; /* Video beside text on desktop */
   align-items: center;
   gap: 20px;
   margin-top: 20px;
   width: 100%;
+  max-width: 1500px; /* Keep the video from ballooning on ultra-wide screens */
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* Video Styling */
 .video-section {
-  flex: 6;
+  flex: 6 1 0; /* Shrinks in step with the focus card (min-width:0 unblocks it) */
+  min-width: 0;
   display: flex;
   border: 5px solid #333;
   border-radius: 10px;
@@ -497,7 +501,10 @@
 /* The New Focus Card */
 .focus-card {
   background-color: #2d2d2d;
-  width: 640px; /* Match video width */
+  /* Shares horizontal space with the video (~40/60) and shrinks with it,
+     instead of a fixed width that forced the video to absorb all shrinkage. */
+  flex: 4 1 0;
+  min-width: 0;
   padding: 30px;
   border-radius: 15px;
   box-shadow: 0 4px 15px rgba(0,0,0,0.5);
@@ -510,7 +517,7 @@
 }
 
 .current-text {
-  font-size: 1.8rem;
+  font-size: clamp(1.2rem, 1.6vw + 0.6rem, 1.8rem);
   color: #61dafb;
   margin-bottom: 20px;
 }
@@ -535,7 +542,7 @@
 
 .scroll-line-prev,
 .scroll-line-next {
-  font-size: 1rem;
+  font-size: clamp(0.85rem, 0.6vw + 0.5rem, 1rem);
   color: #888;
   opacity: 0.55;
   min-height: 1.3em;
@@ -553,7 +560,7 @@
 .scroll-line-current {
   /* Reset heading defaults so it sits flush in the scroll stack */
   margin: 0;
-  font-size: 1.8rem;
+  font-size: clamp(1.2rem, 1.6vw + 0.6rem, 1.8rem);
   color: #61dafb;
   font-weight: 700;
 }
@@ -854,6 +861,7 @@
 
   /* Focus card: full width */
   .focus-card {
+    flex: none;
     width: 100%;
     padding: 20px 14px;
     min-height: auto;
