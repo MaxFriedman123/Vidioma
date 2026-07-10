@@ -53,6 +53,57 @@ class TestNonNativeTranscriptLanguage(unittest.TestCase):
         # No English leaked into the shown transcript.
         self.assertFalse(any(s["source"] == "Hello everyone" for s in snippets))
 
+    def test_empty_line_chunk_is_repaired_not_left_in_original_language(self):
+        # Regression: when the aligned per-line translation is empty/missing for
+        # a line, the displayed snippet must NOT keep its original-language text.
+        # It should be repaired via a direct per-line translation instead.
+        english = [
+            {"text": "Hello everyone", "start": 0.0, "duration": 1.5},
+            {"text": "welcome to the show", "start": 1.5, "duration": 1.5},
+        ]
+        app.get_cached_transcript = lambda vid, lang: (english, False)
+        # First line translated, second line comes back EMPTY (the bug trigger).
+        app.translate_with_alignment = lambda paras, lines, target, source_lang="auto": (
+            [f"[{target}]para" for _ in paras],
+            [["[es]Hola a todos", ""]],
+        )
+        # Direct per-line fallback tags the line so we can assert it ran.
+        orig_tt = app._translate_text
+        app._translate_text = lambda text, target, source_lang="auto": f"[{target}-direct]{text}"
+        try:
+            snippets, paragraphs = app.get_cached_processed_snippets("vid", "es")
+        finally:
+            app._translate_text = orig_tt
+
+        # No original-language (English) line leaked through.
+        self.assertFalse(any(s["source"] == "welcome to the show" for s in snippets))
+        # The empty chunk was repaired by the direct per-line fallback.
+        self.assertEqual(snippets[0]["source"], "[es]Hola a todos")
+        self.assertEqual(snippets[1]["source"], "[es-direct]welcome to the show")
+
+    def test_noop_translation_raises_and_is_not_cached(self):
+        # Regression: if the translator no-ops (returns the source unchanged),
+        # the result is still the original language. We must RAISE (so lru_cache
+        # doesn't memoize English) rather than serve untranslated text.
+        english = [
+            {"text": "Hello everyone", "start": 0.0, "duration": 1.5},
+            {"text": "welcome to the show", "start": 1.5, "duration": 1.5},
+        ]
+        app.get_cached_transcript = lambda vid, lang: (english, False)
+        # Alignment returns the source lines verbatim (provider outage / no-op).
+        app.translate_with_alignment = lambda paras, lines, target, source_lang="auto": (
+            list(paras),
+            [list(group) for group in lines],
+        )
+        # Direct per-line fallback also no-ops (returns input unchanged).
+        orig_tt = app._translate_text
+        app._translate_text = lambda text, target, source_lang="auto": text
+        try:
+            with self.assertRaises(app.TranscriptTranslationError):
+                app.get_cached_processed_snippets("vid", "es")
+        finally:
+            app._translate_text = orig_tt
+
     def test_native_language_left_untouched(self):
         english = [
             {"text": "Hello everyone", "start": 0.0, "duration": 1.5},

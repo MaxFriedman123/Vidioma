@@ -279,7 +279,24 @@ def get_cached_transcript(video_id, from_lang):
             proxy_config = GenericProxyConfig(http_url=http_url, https_url=http_url)
 
         proxy_api = YouTubeTranscriptApi(proxy_config=proxy_config)
-        return attempt_fetch(proxy_api)
+
+        # Bounded server-side retry on the proxy path. The Webshare rotating
+        # config already retries a blocked IP internally, but other transient
+        # upstream errors (connection resets, sporadic 5xx, a cold first proxy
+        # handshake) can still surface on the first try and then succeed on the
+        # next — which is exactly the "fails once, works on retry" symptom.
+        # Retrying here means the user usually doesn't have to.
+        import time
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return attempt_fetch(proxy_api)
+            except Exception as proxy_exc:
+                last_exc = proxy_exc
+                print(f"Proxy fetch attempt {attempt + 1} failed: {proxy_exc}")
+                if attempt < 2:
+                    time.sleep(0.6 * (attempt + 1))
+        raise last_exc
 
 _SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*\s*$')
 # Paragraph sizing: translation quality benefits from context, but the unit
@@ -373,6 +390,39 @@ def group_into_paragraphs(fragments):
     return assigned, paragraphs
 
 
+class TranscriptTranslationError(Exception):
+    """Raised when the transcript must be translated into `from_lang` but the
+    translation didn't actually produce `from_lang` text (provider outage,
+    cooldown, or a no-op auto->same-language result). Raising instead of
+    returning means the (poisoned) result is NOT memoized by lru_cache and a
+    later retry can succeed."""
+    pass
+
+
+def _looks_like_same_text(sources, translations):
+    """True when translations came back byte-identical to their sources for
+    every non-empty source line — i.e. the translator effectively no-op'd, so
+    the "translated" text is still in the original language."""
+    non_empty = [(s or "").strip() for s in sources if (s or "").strip()]
+    if not non_empty:
+        return True
+    same = 0
+    total = 0
+    for s, t in zip(sources, translations):
+        s_clean = (s or "").strip()
+        if not s_clean:
+            continue
+        total += 1
+        if (t or "").strip() == s_clean:
+            same += 1
+    if total == 0:
+        return True
+    # Treat as un-translated only when (almost) everything is identical, so a
+    # transcript with a few proper-noun/number lines that legitimately translate
+    # to themselves isn't flagged.
+    return same / total >= 0.9
+
+
 @lru_cache(maxsize=100)
 def get_cached_processed_snippets(video_id, from_lang):
     """
@@ -429,6 +479,8 @@ def get_cached_processed_snippets(video_id, from_lang):
 
         # Build per-paragraph source-line lists in paragraph order so we can
         # translate paragraphs (for context) and recover aligned per-line text.
+        # We keep this pre-translation source (lines_by_paragraph) so we can
+        # detect (and repair) any line that failed to translate.
         lines_by_paragraph = []
         snippet_idx_by_paragraph = []
         for p_idx in range(len(paragraphs)):
@@ -441,14 +493,46 @@ def get_cached_processed_snippets(video_id, from_lang):
         )
 
         # Overwrite each snippet's displayed source with its translated line so
-        # the shown transcript is actually in `from_lang`.
+        # the shown transcript is actually in `from_lang`. CRITICAL: never leave
+        # an original-language line in place. If a per-line chunk is missing or
+        # empty (DeepL can drop/blank a line, or the aligned list can be short),
+        # translate that individual line directly rather than showing the user
+        # untranslated (original-language) text — which is exactly the "shows
+        # the English transcript" bug when a Spanish video has only English subs.
+        repaired_line_texts = []
         for p_idx, members in enumerate(snippet_idx_by_paragraph):
             line_chunks = translated_lines[p_idx] if p_idx < len(translated_lines) else []
             for slot, snippet_i in enumerate(members):
-                if slot < len(line_chunks) and line_chunks[slot]:
-                    assigned[snippet_i]["source"] = line_chunks[slot]
+                chunk = line_chunks[slot] if slot < len(line_chunks) else ""
+                if not (chunk or "").strip():
+                    # Direct per-line fallback so no original-language line leaks.
+                    original = assigned[snippet_i]["source"]
+                    chunk = (_translate_text(original, from_lang, "auto") or "").strip()
+                if (chunk or "").strip():
+                    assigned[snippet_i]["source"] = chunk
+                repaired_line_texts.append(assigned[snippet_i]["source"])
 
-        paragraphs = translated_paragraphs
+        # If the paragraph translation is empty for a paragraph, rebuild it from
+        # the (now translated) member lines so the practice view has context.
+        rebuilt_paragraphs = []
+        for p_idx, members in enumerate(snippet_idx_by_paragraph):
+            para = translated_paragraphs[p_idx] if p_idx < len(translated_paragraphs) else ""
+            if not (para or "").strip():
+                para = " ".join(assigned[i]["source"] for i in members).strip()
+            rebuilt_paragraphs.append(para)
+        paragraphs = rebuilt_paragraphs
+
+        # Guard against caching an un-translated result. If the whole translation
+        # cascade no-op'd (provider outage / DeepL cooldown / auto-detect landed
+        # on the same language), the "translated" lines are byte-identical to the
+        # originals — i.e. still the video's original language. Raise so this bad
+        # result is NOT memoized by lru_cache and the user's retry can re-attempt.
+        flat_original = [ln for group in lines_by_paragraph for ln in group]
+        if _looks_like_same_text(flat_original, repaired_line_texts):
+            raise TranscriptTranslationError(
+                f"Transcript translation into '{from_lang}' produced no translated text "
+                f"(provider unavailable). Not caching; retry may succeed."
+            )
 
     return assigned, paragraphs
 
@@ -483,6 +567,56 @@ def _deepl_available():
     return bool(DEEPL_API_KEY) and time.time() >= _DEEPL_COOLDOWN_UNTIL
 
 
+# App/YouTube language codes (frontend list + youtube-transcript-api) don't all
+# match DeepL's expected codes. Left un-mapped, e.g. "zh-CN".upper() -> "ZH-CN"
+# and "iw".upper() -> "IW" are rejected by DeepL (400), silently disabling the
+# highest-quality engine for those languages. Map to DeepL's codes; return None
+# for languages DeepL doesn't support so we skip DeepL instead of firing a
+# guaranteed-400 request.
+_DEEPL_TARGET_CODES = {
+    "en": "EN-US", "es": "ES", "fr": "FR", "de": "DE", "it": "IT",
+    "pt": "PT-BR", "ja": "JA", "ko": "KO", "ru": "RU",
+    "zh-cn": "ZH", "zh": "ZH", "iw": None, "he": None,
+}
+# Source codes: DeepL wants the base code (no regional variant) and no EN-US.
+_DEEPL_SOURCE_CODES = {
+    "en": "EN", "es": "ES", "fr": "FR", "de": "DE", "it": "IT",
+    "pt": "PT", "ja": "JA", "ko": "KO", "ru": "RU",
+    "zh-cn": "ZH", "zh": "ZH", "iw": None, "he": None,
+}
+
+
+def _deepl_target_code(lang):
+    """Map an app language code to DeepL's target code, or None if unsupported."""
+    if not lang:
+        return None
+    key = lang.lower()
+    if key in _DEEPL_TARGET_CODES:
+        return _DEEPL_TARGET_CODES[key]
+    base = key.split("-")[0]
+    if base in _DEEPL_TARGET_CODES:
+        return _DEEPL_TARGET_CODES[base]
+    return lang.upper()  # best-effort for codes we didn't special-case
+
+
+def _deepl_source_code(lang):
+    """Map an app language code to DeepL's source code, or None if unsupported/auto."""
+    if not lang or lang == "auto":
+        return None
+    key = lang.lower()
+    if key in _DEEPL_SOURCE_CODES:
+        return _DEEPL_SOURCE_CODES[key]
+    base = key.split("-")[0]
+    if base in _DEEPL_SOURCE_CODES:
+        return _DEEPL_SOURCE_CODES[base]
+    return lang.upper()
+
+
+def _deepl_supports_target(lang):
+    """True when DeepL can translate INTO this language."""
+    return _deepl_target_code(lang) is not None
+
+
 def _deepl_request(texts, target_lang, source_lang="auto", extra_params=None):
     """Low-level DeepL call. `texts` is a list of strings (DeepL translates each
     as its own element and returns them in the SAME order, 1:1).
@@ -499,13 +633,21 @@ def _deepl_request(texts, target_lang, source_lang="auto", extra_params=None):
     if not texts:
         return []
 
+    # Normalize to DeepL's own codes. If DeepL doesn't support the target
+    # language, skip it (return None) so callers fall back instead of us firing
+    # a request DeepL will reject with a 400.
+    deepl_target = _deepl_target_code(target_lang)
+    if deepl_target is None:
+        return None
+    deepl_source = _deepl_source_code(source_lang)
+
     # requests encodes a list value as repeated `text=` params, which is exactly
     # DeepL's multi-text format. Build an explicit tuple list so ordering and the
     # extra params (context/tag_handling/…) are unambiguous.
     fields = [("text", t) for t in texts]
-    fields.append(("target_lang", target_lang.upper()))
-    if source_lang and source_lang != "auto":
-        fields.append(("source_lang", source_lang.upper()))
+    fields.append(("target_lang", deepl_target))
+    if deepl_source:
+        fields.append(("source_lang", deepl_source))
     for k, v in (extra_params or {}).items():
         fields.append((k, v))
 
@@ -1147,6 +1289,15 @@ def get_transcript():
 
     try:
         snippets, paragraphs = get_cached_processed_snippets(video_id, from_lang)
+    except TranscriptTranslationError as e:
+        # The transcript needed manual translation into from_lang but the
+        # translator no-op'd (outage / cooldown). Not cached, so a retry can
+        # succeed — surface a retryable message rather than a hard error.
+        print(f"Transcript translation unavailable for {video_id}: {e}")
+        return jsonify({
+            "error": "We couldn't finish translating this video's subtitles right now. "
+                     "Please try again in a moment.",
+        }), 503
     except Exception as e:
         # Map to an actionable message + status. YouTube blocks datacenter IPs,
         # so on hosts like Render a "blocked" error almost always means the
@@ -1159,11 +1310,19 @@ def get_transcript():
             return jsonify({
                 "error": "Transcript fetching is temporarily unavailable (server proxy not configured).",
             }), 503
-        if "blocked" in low or "ip" in low and "block" in low:
+        # Parenthesized so precedence is explicit (and binds tighter than or).
+        if "blocked" in low or ("ip" in low and "block" in low):
             return jsonify({
                 "error": "YouTube is currently blocking transcript requests from the server. "
                          "Please try again in a moment.",
             }), 503
+        # The pivot-impossible case: the requested language isn't offered by the
+        # video and YouTube can't auto-translate into it. Give a clear message.
+        if "not translatable" in low or ("translation language" in low and "not available" in low):
+            return jsonify({
+                "error": "This video's subtitles can't be provided in the requested language. "
+                         "Try a different language pairing or another video.",
+            }), 404
         if "disabled" in low or "no transcript" in low or "transcriptsdisabled" in low:
             return jsonify({
                 "error": "This video doesn't have subtitles available for the requested language.",
@@ -2251,8 +2410,18 @@ def clear_translation_cache():
     if not supplied or not hmac.compare_digest(supplied, ADMIN_API_KEY):
         return jsonify({"error": "Unauthorized"}), 401
 
+    # Always clear the in-process transcript/snippet lru_caches. These are keyed
+    # on (video_id, from_lang) and hold fetched + manually-translated snippets;
+    # without clearing them, a translation/logic change won't take effect for an
+    # already-cached video until the process restarts or the entry is evicted.
+    get_cached_transcript.cache_clear()
+    get_cached_processed_snippets.cache_clear()
+
     if not redis_client:
-        return jsonify({"error": "Redis not configured"}), 503
+        return jsonify({
+            "message": "Cleared in-process transcript caches (Redis not configured).",
+            "entries_deleted": 0,
+        })
 
     try:
         # A single glob covers every version prefix (v2, v5, …); the previous
@@ -2263,7 +2432,7 @@ def clear_translation_cache():
         for key in redis_client.scan_iter(match="translate_paragraphs:*", count=500):
             total_deleted += redis_client.delete(key)
         return jsonify({
-            "message": f"Cleared {total_deleted} translation cache entries",
+            "message": f"Cleared {total_deleted} translation cache entries and in-process transcript caches",
             "entries_deleted": total_deleted,
         })
     except Exception as e:

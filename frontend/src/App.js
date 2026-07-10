@@ -232,6 +232,15 @@ function App() {
   // callbacks/intervals always use the current token without re-subscribing.
   const accessTokenRef = useRef(accessToken);
   useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
+  // Mirror flushProgress into a ref too. flushProgress gets a new identity every
+  // time the Supabase access token changes (initial resolve, refresh on tab
+  // focus, periodic refresh). The unmount cleanup below must NOT re-run just
+  // because that identity changed — doing so would abort the in-flight
+  // transcript request and strand the loading spinner (looks like a failed
+  // load; a manual retry then works). Calling through the ref lets the cleanup
+  // depend only on stable callbacks, so it truly runs only on unmount.
+  const flushProgressRef = useRef(flushProgress);
+  useEffect(() => { flushProgressRef.current = flushProgress; }, [flushProgress]);
 
   // ── View state: 'home' | 'player' | 'dashboard' | 'classes' | 'classDetail' | 'createAssignment' | 'assignmentDetail' ──
   const [view, setView] = useState('home');
@@ -304,6 +313,13 @@ function App() {
     translationRequestControllersRef.current.forEach((controller) => controller.abort());
     translationRequestControllersRef.current.clear();
   }, []);
+
+  // Stable refs to the request/timer cleanup callbacks so the unmount-only
+  // effect can invoke the latest versions without listing them as deps.
+  const cancelActivePlayerRequestsRef = useRef(cancelActivePlayerRequests);
+  useEffect(() => { cancelActivePlayerRequestsRef.current = cancelActivePlayerRequests; }, [cancelActivePlayerRequests]);
+  const clearPlaybackAttemptTimersRef = useRef(clearPlaybackAttemptTimers);
+  useEffect(() => { clearPlaybackAttemptTimersRef.current = clearPlaybackAttemptTimers; }, [clearPlaybackAttemptTimers]);
 
   const isPlaybackStarted = (state) => state === 1 || state === 3;
   const shouldPromptDashboardManualStart =
@@ -384,15 +400,19 @@ function App() {
     }
   }, [passwordRecoveryPending]);
 
-  // Flush pending progress saves on unmount
+  // Flush pending progress saves on unmount. Depends on NOTHING so it runs only
+  // when the App actually unmounts — not on every access-token refresh (which
+  // would otherwise abort the in-flight transcript request mid-load). We reach
+  // the current callbacks through refs so the empty dep array is safe.
   useEffect(() => {
     return () => {
       activePlayerSessionRef.current += 1;
-      cancelActivePlayerRequests();
-      clearPlaybackAttemptTimers();
-      flushProgress();
+      cancelActivePlayerRequestsRef.current();
+      clearPlaybackAttemptTimersRef.current();
+      flushProgressRef.current();
     };
-  }, [flushProgress, cancelActivePlayerRequests, clearPlaybackAttemptTimers]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
   let interval;
@@ -710,6 +730,10 @@ function App() {
     setAnswered(false);
     setIsError(false);
     setLoadError(null);
+    // Bumping the session above means the in-flight transcript request's finally
+    // will skip its own setIsLoading(false) (session mismatch), so clear it here
+    // — otherwise leaving the player mid-load leaves the home GO button disabled.
+    setIsLoading(false);
     setIsFinished(false);
     setPlayer(null);
     setIsPlayerReady(false);
