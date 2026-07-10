@@ -613,11 +613,13 @@ function App() {
     setToLang(trLang);
     // Mark assignment mode BEFORE the session begins so save/skip logic applies.
     const startedMax = assignment.progress?.max_line_reached ?? 0;
-    // lastActiveAt anchors the active-practice-time delta sent with each save.
+    // lastActiveAt anchors the active-practice-time delta sent with each save;
+    // pendingAttempts accumulates answer submissions since the last save.
     activeAssignmentRef.current = {
       assignmentId: assignment.assignment_id,
       maxLineReached: startedMax,
       lastActiveAt: Date.now(),
+      pendingAttempts: 0,
     };
     setAssignmentBanner({
       title: assignment.title || assignment.videos?.title || 'Assignment',
@@ -667,10 +669,14 @@ function App() {
     const now = Date.now();
     const elapsedSeconds = Math.max(0, Math.round((now - (active.lastActiveAt ?? now)) / 1000));
     active.lastActiveAt = now;
+    // Submission attempts made since the last save; reset once handed off.
+    const attempts = active.pendingAttempts ?? 0;
+    active.pendingAttempts = 0;
     axios.post(`${API_BASE_URL}/api/assignments/${active.assignmentId}/progress`, {
       current_line_index: lineIndex,
       total_lines: totalLines,
       elapsed_seconds: elapsedSeconds,
+      attempts,
     }, { headers: { Authorization: `Bearer ${accessTokenRef.current}` } })
       .catch((err) => console.error('Assignment progress save failed:', err));
   }, []);
@@ -1002,6 +1008,13 @@ function App() {
       const paragraphTranslation = translatedParagraphs[paragraphIdx];
       if (!paragraphTranslation) {
         return;
+      }
+
+      // Count this submission as an attempt for assignment analytics. It's sent
+      // as a delta with the next progress save (see saveAssignmentProgress).
+      if (activeAssignmentRef.current) {
+        activeAssignmentRef.current.pendingAttempts =
+          (activeAssignmentRef.current.pendingAttempts ?? 0) + 1;
       }
 
       const score = getBestWindowSimilarity(userInput, paragraphTranslation, currentLine?.source);

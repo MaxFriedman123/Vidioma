@@ -64,6 +64,12 @@ create unique index if not exists uniq_target
 --                        per-save elapsed delta (capped, so idle gaps where the
 --                        student walked away don't inflate it) and the backend
 --                        adds it here
+--   total_attempts     : accumulated count of answer submissions across all
+--                        lines; the client sends a per-save delta (capped) and
+--                        the backend adds it here. Shown against total_lines so
+--                        a teacher can gauge how much a student struggled.
+--   completed_at       : when the student submitted the final line (their "ended
+--                        at" time)
 create table if not exists public.assignment_progress (
     id                  uuid primary key default gen_random_uuid(),
     assignment_id       uuid not null references public.assignments(assignment_id) on delete cascade,
@@ -72,6 +78,7 @@ create table if not exists public.assignment_progress (
     max_line_reached    integer not null default 0,
     total_lines         integer not null default 0,
     active_seconds      integer not null default 0,
+    total_attempts      integer not null default 0,
     completed           boolean not null default false,
     completed_at        timestamptz,
     last_accessed_at    timestamptz not null default now(),
@@ -80,9 +87,11 @@ create table if not exists public.assignment_progress (
 
 create index if not exists idx_aprogress_student on public.assignment_progress(student_id);
 
--- If assignment_progress predates active practice-time tracking, add the column:
+-- If assignment_progress predates these columns, add them:
 alter table public.assignment_progress
     add column if not exists active_seconds integer not null default 0;
+alter table public.assignment_progress
+    add column if not exists total_attempts integer not null default 0;
 
 -- ----------------------------------------------------------------------------
 -- NOTE ON RLS: the backend uses the Supabase SERVICE ROLE key and enforces

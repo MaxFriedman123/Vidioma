@@ -24,6 +24,12 @@ function formatActiveTime(seconds) {
   return `${s}s`;
 }
 
+// When the student submitted the final line ("ended at"), locale-formatted.
+function formatEndedAt(completedAt) {
+  if (!completedAt) return null;
+  return new Date(completedAt).toLocaleString();
+}
+
 // Assignment detail: teachers see per-student completion; students see the
 // assignment plus a Start/Continue button that launches the no-skip player.
 export default function AssignmentDetail({ assignmentId, onBack, onStartAssignment }) {
@@ -106,6 +112,7 @@ export default function AssignmentDetail({ assignmentId, onBack, onStartAssignme
               {data.students.map((s) => {
                 const pct = s.total_lines > 0 ? Math.round((s.current_line_index / s.total_lines) * 100) : 0;
                 const activeTime = formatActiveTime(s.active_seconds);
+                const endedAt = formatEndedAt(s.completed_at);
                 return (
                   <div key={s.student_id} className="class-member-card">
                     <div className="class-member-avatar">
@@ -123,6 +130,12 @@ export default function AssignmentDetail({ assignmentId, onBack, onStartAssignme
                         </span>
                       ) : (
                         <span className="assignment-status-notstarted">Not started</span>
+                      )}
+                      {s.started && (
+                        <span className="assignment-student-stats">
+                          {s.total_attempts} attempt{s.total_attempts === 1 ? '' : 's'} over {s.total_lines} line{s.total_lines === 1 ? '' : 's'}
+                          {endedAt ? ` · Submitted ${endedAt}` : ''}
+                        </span>
                       )}
                       <div className="dashboard-progress-bar">
                         <div className="dashboard-progress-fill" style={{ width: `${s.completed ? 100 : pct}%` }} />
@@ -151,6 +164,9 @@ function StudentAssignmentActions({ assignment, onStartAssignment }) {
     ? Math.round((progress.current_line_index / progress.total_lines) * 100)
     : 0;
   const activeTime = formatActiveTime(progress?.active_seconds);
+  const endedAt = formatEndedAt(progress?.completed_at);
+  const totalAttempts = progress?.total_attempts ?? 0;
+  const totalLines = progress?.total_lines ?? 0;
 
   return (
     <div className="assignment-student-actions">
@@ -169,6 +185,12 @@ function StudentAssignmentActions({ assignment, onStartAssignment }) {
         </>
       ) : (
         <p className="assignment-status-notstarted">Not started yet.</p>
+      )}
+      {started && (
+        <p className="assignment-student-stats">
+          {totalAttempts} attempt{totalAttempts === 1 ? '' : 's'} over {totalLines} line{totalLines === 1 ? '' : 's'}
+          {endedAt ? ` · Submitted ${endedAt}` : ''}
+        </p>
       )}
       <button className="auth-submit" onClick={() => onStartAssignment(assignment)}>
         {completed ? 'Review Again' : started ? 'Continue' : 'Start Assignment'}

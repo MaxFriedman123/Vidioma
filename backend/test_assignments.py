@@ -317,6 +317,26 @@ class TestNoSkipProgress(AssignmentTestBase):
         r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10}, headers=self.hdr())
         self.assertEqual(r.get_json()["progress"]["active_seconds"], 0)
 
+    def test_attempts_accumulate(self):
+        aid = self._make()
+        self.as_user("stud1")
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10, "attempts": 3}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["total_attempts"], 3)
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 2, "total_lines": 10, "attempts": 2}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["total_attempts"], 5)
+
+    def test_attempts_delta_capped(self):
+        aid = self._make()
+        self.as_user("stud1")
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10, "attempts": 99999}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["total_attempts"], app.MAX_ASSIGNMENT_ATTEMPTS_DELTA)
+
+    def test_missing_attempts_defaults_to_zero(self):
+        aid = self._make()
+        self.as_user("stud1")
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["total_attempts"], 0)
+
 
 class TestDeleteAssignment(AssignmentTestBase):
     def test_owner_deletes(self):

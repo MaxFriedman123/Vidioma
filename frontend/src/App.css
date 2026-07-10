@@ -2345,6 +2345,7 @@
 .assignment-status-progress { font-size: 0.85rem; color: #ffd479; font-weight: 600; }
 .assignment-status-notstarted { font-size: 0.85rem; color: #888; font-weight: 600; }
 .assignment-student-progress { flex: 1; gap: 6px; display: flex; flex-direction: column; }
+.assignment-student-stats { font-size: 0.78rem; color: #999; font-weight: 500; }
 .assignment-detail-thumb {
   width: 160px;
   max-width: 40%;
