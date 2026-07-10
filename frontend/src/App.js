@@ -613,7 +613,12 @@ function App() {
     setToLang(trLang);
     // Mark assignment mode BEFORE the session begins so save/skip logic applies.
     const startedMax = assignment.progress?.max_line_reached ?? 0;
-    activeAssignmentRef.current = { assignmentId: assignment.assignment_id, maxLineReached: startedMax };
+    // lastActiveAt anchors the active-practice-time delta sent with each save.
+    activeAssignmentRef.current = {
+      assignmentId: assignment.assignment_id,
+      maxLineReached: startedMax,
+      lastActiveAt: Date.now(),
+    };
     setAssignmentBanner({
       title: assignment.title || assignment.videos?.title || 'Assignment',
       dueDate: assignment.due_date || null,
@@ -657,9 +662,15 @@ function App() {
     if (!active) return;
     if (lineIndex > active.maxLineReached) active.maxLineReached = lineIndex;
     if (!accessTokenRef.current) return;
+    // Active practice time: seconds since the last save. The backend caps each
+    // delta, so a long idle gap between lines can't inflate the total.
+    const now = Date.now();
+    const elapsedSeconds = Math.max(0, Math.round((now - (active.lastActiveAt ?? now)) / 1000));
+    active.lastActiveAt = now;
     axios.post(`${API_BASE_URL}/api/assignments/${active.assignmentId}/progress`, {
       current_line_index: lineIndex,
       total_lines: totalLines,
+      elapsed_seconds: elapsedSeconds,
     }, { headers: { Authorization: `Bearer ${accessTokenRef.current}` } })
       .catch((err) => console.error('Assignment progress save failed:', err));
   }, []);

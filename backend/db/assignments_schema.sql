@@ -60,6 +60,10 @@ create unique index if not exists uniq_target
 --   max_line_reached   : furthest line the student has legitimately reached;
 --                        the no-skip player never lets them jump past this
 --   completed          : set true when they finish the last line
+--   active_seconds     : accumulated active practice time; the client sends a
+--                        per-save elapsed delta (capped, so idle gaps where the
+--                        student walked away don't inflate it) and the backend
+--                        adds it here
 create table if not exists public.assignment_progress (
     id                  uuid primary key default gen_random_uuid(),
     assignment_id       uuid not null references public.assignments(assignment_id) on delete cascade,
@@ -67,6 +71,7 @@ create table if not exists public.assignment_progress (
     current_line_index  integer not null default 0,
     max_line_reached    integer not null default 0,
     total_lines         integer not null default 0,
+    active_seconds      integer not null default 0,
     completed           boolean not null default false,
     completed_at        timestamptz,
     last_accessed_at    timestamptz not null default now(),
@@ -74,6 +79,10 @@ create table if not exists public.assignment_progress (
 );
 
 create index if not exists idx_aprogress_student on public.assignment_progress(student_id);
+
+-- If assignment_progress predates active practice-time tracking, add the column:
+alter table public.assignment_progress
+    add column if not exists active_seconds integer not null default 0;
 
 -- ----------------------------------------------------------------------------
 -- NOTE ON RLS: the backend uses the Supabase SERVICE ROLE key and enforces

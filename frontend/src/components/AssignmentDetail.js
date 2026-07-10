@@ -12,6 +12,18 @@ function formatDue(dueDate) {
   return { label: d.toLocaleString(), overdue };
 }
 
+// Human-readable active practice time (e.g. "12m 30s", "1h 05m").
+function formatActiveTime(seconds) {
+  const total = Math.max(0, Math.round(seconds || 0));
+  if (total === 0) return null;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
 // Assignment detail: teachers see per-student completion; students see the
 // assignment plus a Start/Continue button that launches the no-skip player.
 export default function AssignmentDetail({ assignmentId, onBack, onStartAssignment }) {
@@ -93,6 +105,7 @@ export default function AssignmentDetail({ assignmentId, onBack, onStartAssignme
             <div className="class-members-list">
               {data.students.map((s) => {
                 const pct = s.total_lines > 0 ? Math.round((s.current_line_index / s.total_lines) * 100) : 0;
+                const activeTime = formatActiveTime(s.active_seconds);
                 return (
                   <div key={s.student_id} className="class-member-card">
                     <div className="class-member-avatar">
@@ -101,9 +114,13 @@ export default function AssignmentDetail({ assignmentId, onBack, onStartAssignme
                     <div className="class-member-info assignment-student-progress">
                       <span className="class-member-name">{s.user_name}</span>
                       {s.completed ? (
-                        <span className="assignment-status-complete">✓ Completed</span>
+                        <span className="assignment-status-complete">
+                          ✓ Completed{activeTime ? ` — ${activeTime}` : ''}
+                        </span>
                       ) : s.started ? (
-                        <span className="assignment-status-progress">In progress — {pct}%</span>
+                        <span className="assignment-status-progress">
+                          In progress — {pct}%{activeTime ? ` · ${activeTime}` : ''}
+                        </span>
                       ) : (
                         <span className="assignment-status-notstarted">Not started</span>
                       )}
@@ -133,14 +150,19 @@ function StudentAssignmentActions({ assignment, onStartAssignment }) {
   const pct = progress && progress.total_lines > 0
     ? Math.round((progress.current_line_index / progress.total_lines) * 100)
     : 0;
+  const activeTime = formatActiveTime(progress?.active_seconds);
 
   return (
     <div className="assignment-student-actions">
       {completed ? (
-        <p className="assignment-status-complete">✓ You've completed this assignment.</p>
+        <p className="assignment-status-complete">
+          ✓ You've completed this assignment.{activeTime ? ` Practice time: ${activeTime}.` : ''}
+        </p>
       ) : started ? (
         <>
-          <p className="assignment-status-progress">In progress — {pct}%</p>
+          <p className="assignment-status-progress">
+            In progress — {pct}%{activeTime ? ` · ${activeTime} practiced` : ''}
+          </p>
           <div className="dashboard-progress-bar">
             <div className="dashboard-progress-fill" style={{ width: `${pct}%` }} />
           </div>

@@ -1828,6 +1828,12 @@ def _teacher_owns_class(class_id, teacher_id):
     return bool(rows)
 
 
+# Max active-practice seconds accepted from a single progress save. The client
+# saves once per completed line, so this bounds how much a single interval can
+# contribute and neutralizes idle time or crafted requests.
+MAX_ASSIGNMENT_ELAPSED_DELTA = 300
+
+
 def _assignment_student_ids(assignment_id):
     """Expand an assignment's targets into the concrete set of student ids.
     Whole-class targets expand to the class's current roster (so students who
@@ -2099,6 +2105,7 @@ def get_assignment_detail(assignment_id):
                         "completed": bool(p and p.get("completed")),
                         "current_line_index": (p or {}).get("current_line_index", 0),
                         "total_lines": (p or {}).get("total_lines", 0),
+                        "active_seconds": (p or {}).get("active_seconds", 0),
                         "started": p is not None,
                     })
             students.sort(key=lambda s: s["user_name"].lower())
@@ -2164,6 +2171,10 @@ def upsert_assignment_progress(assignment_id):
 
     incoming_line = _nn_int(data.get("current_line_index", 0))
     total_lines = _nn_int(data.get("total_lines", 0))
+    # Active practice time: the client reports the seconds elapsed since its last
+    # save. Cap each delta so an idle gap (student walked away, tab left open)
+    # can't inflate the accumulated total past a plausible per-interval maximum.
+    elapsed_seconds = min(_nn_int(data.get("elapsed_seconds", 0)), MAX_ASSIGNMENT_ELAPSED_DELTA)
 
     try:
         existing = _sb_get("assignment_progress", {
@@ -2171,6 +2182,7 @@ def upsert_assignment_progress(assignment_id):
         })
         prev = existing[0] if existing else None
         prev_max = prev.get("max_line_reached", 0) if prev else 0
+        prev_active = prev.get("active_seconds", 0) if prev else 0
 
         if total_lines and incoming_line > total_lines:
             incoming_line = total_lines
@@ -2189,6 +2201,7 @@ def upsert_assignment_progress(assignment_id):
             "current_line_index": current_line,
             "max_line_reached": new_max,
             "total_lines": total_lines or (prev.get("total_lines", 0) if prev else 0),
+            "active_seconds": prev_active + elapsed_seconds,
             "completed": completed or (prev.get("completed", False) if prev else False),
             "last_accessed_at": datetime.now(timezone.utc).isoformat(),
         }

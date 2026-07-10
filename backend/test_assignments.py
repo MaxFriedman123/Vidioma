@@ -296,6 +296,27 @@ class TestNoSkipProgress(AssignmentTestBase):
         r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10}, headers=self.hdr())
         self.assertEqual(r.status_code, 403)
 
+    def test_active_seconds_accumulate(self):
+        aid = self._make()
+        self.as_user("stud1")
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10, "elapsed_seconds": 30}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["active_seconds"], 30)
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 2, "total_lines": 10, "elapsed_seconds": 45}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["active_seconds"], 75)
+
+    def test_active_seconds_delta_capped(self):
+        aid = self._make()
+        self.as_user("stud1")
+        # An implausibly large delta (idle gap) is capped at MAX_ASSIGNMENT_ELAPSED_DELTA.
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10, "elapsed_seconds": 99999}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["active_seconds"], app.MAX_ASSIGNMENT_ELAPSED_DELTA)
+
+    def test_missing_elapsed_defaults_to_zero(self):
+        aid = self._make()
+        self.as_user("stud1")
+        r = self.client.post(f"/api/assignments/{aid}/progress", json={"current_line_index": 1, "total_lines": 10}, headers=self.hdr())
+        self.assertEqual(r.get_json()["progress"]["active_seconds"], 0)
+
 
 class TestDeleteAssignment(AssignmentTestBase):
     def test_owner_deletes(self):
