@@ -15,6 +15,16 @@ import AssignmentDetail from './components/AssignmentDetail';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
+// Hard client-side timeout for the transcript request. Fetching + (when the
+// video lacks native subtitles in the chosen language) fully translating the
+// transcript can be slow, but it must never hang forever — without this the
+// loading spinner could spin indefinitely if the backend stalls. The backend
+// caps its own translation work well under this, so exceeding it means
+// something is genuinely stuck and the user should retry.
+const TRANSCRIPT_REQUEST_TIMEOUT_MS = 90000;
+const TRANSCRIPT_TIMEOUT_MESSAGE =
+  "This video took too long to load — building the transcript can be slow for long videos or less common languages. Please try again.";
+
 // Languages Array with Flag Image URLs
 const languages = [
   { code: 'en', name: 'English', icon: 'https://flagcdn.com/w40/us.png' },
@@ -81,6 +91,11 @@ const isCanceledRequestError = (error) =>
   (typeof axios.isCancel === 'function' && axios.isCancel(error)) ||
   error?.code === 'ERR_CANCELED' ||
   error?.name === 'CanceledError';
+
+// A request that exceeded its axios `timeout` (distinct from an intentional
+// AbortController cancel) so we can show a "took too long, retry" message.
+const isTimeoutError = (error) =>
+  error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT';
 
 // Helper function to strip line breaks, punctuation, and extra spaces
 const normalizeText = (text) => {
@@ -523,6 +538,7 @@ function App() {
         to_lang: toLang
        }, {
         signal: controller.signal,
+        timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS,
       });
       if (activePlayerSessionRef.current !== sessionId) {
         return;
@@ -553,6 +569,7 @@ function App() {
 
       console.error("Error:", error);
       setLoadError(
+        (isTimeoutError(error) && TRANSCRIPT_TIMEOUT_MESSAGE) ||
         error?.response?.data?.error ||
         "We couldn't load this video. Check the URL and your connection, then try again."
       );
@@ -588,6 +605,7 @@ function App() {
         to_lang: translationLanguage,
       }, {
         signal: controller.signal,
+        timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS,
       });
 
       if (activePlayerSessionRef.current !== sessionId) {
@@ -607,6 +625,7 @@ function App() {
 
       console.error('Error:', error);
       setLoadError(
+        (isTimeoutError(error) && TRANSCRIPT_TIMEOUT_MESSAGE) ||
         error?.response?.data?.error ||
         "We couldn't load this video. Please try again."
       );
@@ -657,7 +676,7 @@ function App() {
     try {
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
         url: requestUrl, from_lang: tLang, to_lang: trLang,
-      }, { signal: controller.signal });
+      }, { signal: controller.signal, timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS });
       if (activePlayerSessionRef.current !== sessionId) return;
 
       const snippets = response.data.snippets;
@@ -670,7 +689,11 @@ function App() {
     } catch (error) {
       if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) return;
       console.error('Assignment load error:', error);
-      setLoadError(error?.response?.data?.error || "We couldn't load this assignment. Please try again.");
+      setLoadError(
+        (isTimeoutError(error) && TRANSCRIPT_TIMEOUT_MESSAGE) ||
+        error?.response?.data?.error ||
+        "We couldn't load this assignment. Please try again."
+      );
     } finally {
       if (transcriptRequestControllerRef.current === controller) transcriptRequestControllerRef.current = null;
       if (activePlayerSessionRef.current === sessionId) setIsLoading(false);

@@ -25,8 +25,50 @@ import requests as http_requests
 from datetime import datetime, timezone
 from deep_translator import GoogleTranslator
 from functools import lru_cache, wraps
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import jwt
+
+# Hard timeout (seconds) for a single scraped-translation network call. Without
+# it, a stalled socket in the translators/deep-translator libraries hangs a Flask
+# worker indefinitely (the "transcript loads forever" symptom). Defined here so
+# the deep-translator request shim below can use it at import time.
+_TRANSLATE_CALL_TIMEOUT = 12.0
+
+# deep-translator's GoogleTranslator issues a bare `requests.get(...)` with NO
+# timeout, so a stalled connection would hang forever. Inject a default timeout
+# into the requests.get/post that deep-translator's modules call. We patch each
+# deep_translator submodule's own `requests` reference (they do `import requests`
+# then `requests.get(...)`), leaving the app's other requests usage untouched.
+def _install_deep_translator_timeout(default_timeout):
+    try:
+        import importlib
+        import requests as _rq
+
+        def _with_timeout(func):
+            def wrapper(*args, **kwargs):
+                kwargs.setdefault("timeout", default_timeout)
+                return func(*args, **kwargs)
+            return wrapper
+
+        for _mod_name in ("google", "base"):
+            try:
+                _m = importlib.import_module(f"deep_translator.{_mod_name}")
+            except Exception:
+                continue
+            _mod_rq = getattr(_m, "requests", None)
+            if _mod_rq is _rq:
+                # Wrap the shared requests module's get/post once (idempotent).
+                if not getattr(_rq.get, "_vidioma_timeout_wrapped", False):
+                    _rq.get = _with_timeout(_rq.get)
+                    _rq.get._vidioma_timeout_wrapped = True
+                if not getattr(_rq.post, "_vidioma_timeout_wrapped", False):
+                    _rq.post = _with_timeout(_rq.post)
+                    _rq.post._vidioma_timeout_wrapped = True
+    except Exception as _exc:  # pragma: no cover - never block startup on this
+        print(f"Warning: could not install deep-translator timeout shim: {_exc}")
+
+
+_install_deep_translator_timeout(_TRANSLATE_CALL_TIMEOUT)
 
 app = Flask(__name__)
 CORS(app)
@@ -617,6 +659,46 @@ def _deepl_supports_target(lang):
     return _deepl_target_code(lang) is not None
 
 
+# ── Per-engine language-code normalization ──────────────────────────────
+# The app/YouTube language code for a language is NOT accepted uniformly by
+# every backend engine. Hebrew is the worst offender: the app sends "iw" (the
+# legacy ISO code YouTube uses), but the `translators` package (Bing + the free
+# engines) only accepts "he" and rejects "iw" outright, while deep-translator's
+# Google only accepts "iw" and rejects "he". Left unmapped, a Hebrew target made
+# EVERY translators engine raise "Unsupported language[iw]" — so a video that
+# needed manual translation into Hebrew burned ~15 failing scraping calls per
+# paragraph before deep-translator's Google finally worked. Combined with the
+# lack of any request timeout, that reads to the user as "loads forever".
+#
+# Normalize per engine so each call uses the code that engine actually accepts.
+_TS_CODE_OVERRIDES = {   # codes for the `translators` package (Bing + free)
+    "iw": "he",          # translators wants modern "he", not legacy "iw"
+}
+_GOOGLE_CODE_OVERRIDES = {  # codes for deep-translator's GoogleTranslator
+    "he": "iw",             # deep-translator's Google wants legacy "iw"
+}
+
+
+def _ts_lang(code):
+    """Normalize a language code for the `translators` package."""
+    if not code:
+        return code
+    key = code.lower()
+    return _TS_CODE_OVERRIDES.get(key, code)
+
+
+def _google_lang(code):
+    """Normalize a language code for deep-translator's GoogleTranslator."""
+    if not code or code == "auto":
+        return code
+    key = code.lower()
+    return _GOOGLE_CODE_OVERRIDES.get(key, code)
+
+
+# _TRANSLATE_CALL_TIMEOUT is defined near the top of the module (before the
+# deep-translator request-timeout shim, which needs it at import time).
+
+
 def _deepl_request(texts, target_lang, source_lang="auto", extra_params=None):
     """Low-level DeepL call. `texts` is a list of strings (DeepL translates each
     as its own element and returns them in the SAME order, 1:1).
@@ -800,15 +882,19 @@ def _ts_translate(engine, text, target_lang, source_lang, attempts=1):
         print(f"translators import failed: {exc}; package disabled for this process")
         _TRANSLATORS_IMPORT_FAILED = True
         return None
-    src = "auto" if (source_lang or "auto") == "auto" else source_lang
+    src = "auto" if (source_lang or "auto") == "auto" else _ts_lang(source_lang)
+    tgt = _ts_lang(target_lang)
     last_exc = None
     for attempt in range(attempts):
         try:
+            # timeout bounds the underlying HTTP call so a stalled socket can't
+            # hang the whole cascade (and the request) indefinitely.
             return ts.translate_text(
                 text,
                 translator=engine,
                 from_language=src,
-                to_language=target_lang,
+                to_language=tgt,
+                timeout=_TRANSLATE_CALL_TIMEOUT,
             )
         except Exception as exc:
             last_exc = exc
@@ -844,6 +930,29 @@ def _bing_translate(text, target_lang, source_lang, attempts=3):
 _QUALITY_FALLBACK_ENGINES = ("alibaba", "caiyun", "sogou", "iciba", "youdao", "reverso")
 
 
+def _google_translate(text, target_lang, source_lang="auto"):
+    """Translate one string via deep-translator's Google with a hard timeout.
+
+    deep-translator issues a plain requests.get() with NO timeout (see the shim
+    installed at import time, which injects _TRANSLATE_CALL_TIMEOUT), so a stalled
+    socket now errors at the timeout instead of hanging the worker forever — the
+    "transcript loads forever" symptom. Language codes are normalized to the codes
+    Google's endpoint wants (e.g. Hebrew -> "iw"). Returns "" on timeout/failure so
+    the caller can fall back or surface a clean error rather than spinning.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return ""
+    tgt = _google_lang(target_lang)
+    src = _google_lang(source_lang) if source_lang and source_lang != "auto" else "auto"
+    try:
+        translator = GoogleTranslator(source=src, target=tgt)
+        return translator.translate(clean) or ""
+    except Exception as exc:
+        print(f"Google translate failed: {exc}")
+        return ""
+
+
 def _translate_text(text, target_lang, source_lang="auto"):
     """Quality-first cascade: DeepL → Bing → multiple free engines → Google.
 
@@ -866,8 +975,7 @@ def _translate_text(text, target_lang, source_lang="auto"):
         if result and not isinstance(result, Exception):
             return result
     print("All quality engines failed; falling back to Google (may produce lower-quality output)")
-    translator = GoogleTranslator(source=source_lang, target=target_lang)
-    return translator.translate(text) or ""
+    return _google_translate(text, target_lang, source_lang)
 
 
 def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
@@ -1197,12 +1305,8 @@ def _translate_line_anchors(lines_flat, target_lang, source_lang, max_workers=8)
         clean = (text or "").replace("\n", " ").strip()
         if not clean:
             return ""
-        try:
-            translator = GoogleTranslator(source=source_lang, target=target_lang)
-            return (translator.translate(clean) or clean).strip()
-        except Exception as exc:
-            print(f"Line anchor translate failed: {exc}")
-            return clean
+        # Timeout-bounded + language-code-normalized Google call.
+        return (_google_translate(clean, target_lang, source_lang) or clean).strip()
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         return list(pool.map(_one, lines_flat))
@@ -1260,11 +1364,39 @@ def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source
         return p_idx, para_text, lines
 
     # Parallelize across paragraphs (a lookahead batch is small, ~3 paragraphs).
+    # A hard wall-clock cap guarantees this returns even if an engine stalls past
+    # its own per-call timeout: any paragraph that doesn't finish in time is left
+    # empty (the manual-translate branch repairs empty lines individually, and
+    # /api/translate rebuilds empty paragraphs). This is the backstop that keeps
+    # the transcript from "loading forever".
     max_workers = min(4, max(1, n_paras))
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for p_idx, para_text, lines in pool.map(_process, range(n_paras)):
-            translated_paragraphs[p_idx] = para_text
-            translated_lines[p_idx] = lines
+    # Budget scales with batch size but is bounded so a huge lookahead can't run
+    # unbounded. Per-call timeout is _TRANSLATE_CALL_TIMEOUT; allow a couple of
+    # sequential calls per paragraph plus slack.
+    deadline = _TRANSLATE_CALL_TIMEOUT * 3 + 5.0
+    # NOTE: we deliberately do NOT use `with ThreadPoolExecutor(...) as pool`.
+    # The context manager's __exit__ calls shutdown(wait=True), which would block
+    # on any still-running task — reintroducing the exact "hangs forever" bug we
+    # are fixing. Instead we shut down without waiting and cancel queued tasks, so
+    # this function always returns within `deadline`. Per-call network timeouts
+    # ensure abandoned worker threads die on their own shortly after.
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {pool.submit(_process, p_idx): p_idx for p_idx in range(n_paras)}
+        try:
+            for future in as_completed(futures, timeout=deadline):
+                try:
+                    p_idx, para_text, lines = future.result()
+                    translated_paragraphs[p_idx] = para_text
+                    translated_lines[p_idx] = lines
+                except Exception as exc:
+                    print(f"Paragraph translation task failed: {exc}")
+        except FuturesTimeoutError:
+            done = sum(1 for f in futures if f.done())
+            print(f"translate_with_alignment hit {deadline:.0f}s cap; {done}/{n_paras} paragraphs done, rest left empty")
+    finally:
+        # Don't wait on in-flight tasks; cancel anything not yet started.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return translated_paragraphs, translated_lines
 

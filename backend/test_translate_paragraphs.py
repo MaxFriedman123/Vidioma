@@ -354,5 +354,95 @@ class TestDeeplStructuredLines(unittest.TestCase):
         self.assertEqual(tp[0], " ".join(tl[0]))
 
 
+class TestLanguageCodeNormalization(unittest.TestCase):
+    """Hebrew is 'iw' in the app/YouTube but the translators package wants 'he'
+    and deep-translator's Google wants 'iw'. Mismatched codes made every
+    translators engine reject a Hebrew target, which (with no timeout) read as
+    'transcript loads forever'."""
+
+    def test_translators_code_maps_iw_to_he(self):
+        import app
+        self.assertEqual(app._ts_lang("iw"), "he")
+        self.assertEqual(app._ts_lang("IW"), "he")
+        self.assertEqual(app._ts_lang("he"), "he")
+        self.assertEqual(app._ts_lang("es"), "es")
+
+    def test_google_code_maps_he_to_iw(self):
+        import app
+        self.assertEqual(app._google_lang("he"), "iw")
+        self.assertEqual(app._google_lang("iw"), "iw")
+        self.assertEqual(app._google_lang("es"), "es")
+        self.assertEqual(app._google_lang("auto"), "auto")
+
+    def test_ts_translate_uses_normalized_codes(self):
+        import app
+        captured = {}
+
+        class FakeTs:
+            @staticmethod
+            def translate_text(text, translator=None, from_language=None, to_language=None, timeout=None):
+                captured["to"] = to_language
+                captured["from"] = from_language
+                captured["timeout"] = timeout
+                return "ok"
+
+        import sys
+        original = sys.modules.get("translators")
+        sys.modules["translators"] = FakeTs
+        app._TRANSLATORS_IMPORT_FAILED = False
+        try:
+            app._ts_translate("bing", "hello", "iw", "iw", attempts=1)
+        finally:
+            if original is not None:
+                sys.modules["translators"] = original
+            else:
+                del sys.modules["translators"]
+        # iw normalized to he for the translators package, and a timeout is passed.
+        self.assertEqual(captured["to"], "he")
+        self.assertEqual(captured["from"], "he")
+        self.assertIsNotNone(captured["timeout"])
+
+
+class TestTranslateWithAlignmentDeadline(unittest.TestCase):
+    """translate_with_alignment must always return within its wall-clock cap even
+    if a paragraph task hangs — the backstop against the infinite spinner."""
+
+    def test_returns_within_cap_when_a_paragraph_hangs(self):
+        import app, time
+
+        orig_timeout = app._TRANSLATE_CALL_TIMEOUT
+        orig_deepl = app._deepl_available
+        orig_tp = app.translate_paragraphs
+        orig_align = app._legacy_align_paragraph
+        app._TRANSLATE_CALL_TIMEOUT = 1.0  # deadline = 1*3 + 5 = 8s
+        app._deepl_available = lambda: False
+
+        def slow_tp(paras, target, source_lang="auto"):
+            if paras and "HANG" in paras[0]:
+                time.sleep(60)
+            return [f"T::{p}" for p in paras]
+
+        app.translate_paragraphs = slow_tp
+        app._legacy_align_paragraph = lambda pt, sl, tl, srcl: [f"L::{x}" for x in sl]
+        try:
+            start = time.time()
+            tp, tl = app.translate_with_alignment(
+                ["normal one", "HANG this", "normal three"],
+                [["normal one"], ["HANG this"], ["normal three"]],
+                "he", "auto",
+            )
+            elapsed = time.time() - start
+        finally:
+            app._TRANSLATE_CALL_TIMEOUT = orig_timeout
+            app._deepl_available = orig_deepl
+            app.translate_paragraphs = orig_tp
+            app._legacy_align_paragraph = orig_align
+
+        self.assertLess(elapsed, 15, f"did not honor wall-clock cap ({elapsed:.1f}s)")
+        self.assertTrue(tp[0])
+        self.assertTrue(tp[2])
+        self.assertEqual(tp[1], "")  # hung paragraph left empty
+
+
 if __name__ == "__main__":
     unittest.main()
