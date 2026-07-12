@@ -444,5 +444,161 @@ class TestTranslateWithAlignmentDeadline(unittest.TestCase):
         self.assertEqual(tp[1], "")  # hung paragraph left empty
 
 
+class _FakeRedisPipe:
+    def __init__(self, store):
+        self.store = store
+        self.ops = []
+
+    def setex(self, k, ttl, v):
+        self.ops.append((k, v))
+        return self
+
+    def execute(self):
+        for k, v in self.ops:
+            self.store[k] = v
+        self.ops = []
+
+
+class _FakeRedis:
+    """Minimal in-memory Redis supporting the ops /api/translate + the L2
+    transcript cache use (get/mget/setex/pipeline)."""
+    def __init__(self):
+        self.store = {}
+
+    def get(self, k):
+        return self.store.get(k)
+
+    def mget(self, keys):
+        return [self.store.get(k) for k in keys]
+
+    def setex(self, k, ttl, v):
+        self.store[k] = v
+
+    def pipeline(self):
+        return _FakeRedisPipe(self.store)
+
+
+class TestPerParagraphTranslateCache(unittest.TestCase):
+    """The alignment path caches EACH paragraph under its own key so the same
+    paragraph reused in a different lookahead/scrub window is a hit, with
+    byte-identical output. Verifies cross-window reuse + misses-only translation
+    + a per-paragraph write guard that never caches empty/untranslated work."""
+
+    def setUp(self):
+        import app
+        self._orig_redis = app.redis_client
+        self._orig_twa = app.translate_with_alignment
+        self.fake = _FakeRedis()
+        app.redis_client = self.fake
+        self.calls = []
+
+        def fake_twa(paras, lines, target, source_lang="auto"):
+            self.calls.append(list(paras))
+            tp, tl = [], []
+            for p, grp in zip(paras, lines):
+                if p == "EMPTY":
+                    tp.append("")
+                    tl.append([])
+                elif p == "SAME":
+                    tp.append(p)          # comes back identical to source
+                    tl.append(list(grp))
+                else:
+                    tp.append(f"[{target}]{p}")
+                    tl.append([f"[{target}]{x}" for x in grp])
+            return tp, tl
+
+        app.translate_with_alignment = fake_twa
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        import app
+        app.redis_client = self._orig_redis
+        app.translate_with_alignment = self._orig_twa
+
+    def _req(self, paras, lines):
+        return self.client.post("/api/translate", json={
+            "paragraphs": paras, "lines": lines, "from_lang": "es", "to_lang": "en",
+        }).get_json()
+
+    def test_cross_window_reuse_and_misses_only(self):
+        a = self._req(["P0", "P1", "P2"], [["a0"], ["b0", "b1"], ["c0"]])
+        self.assertFalse(a["cache_hit"])
+        self.assertEqual(a["translated_paragraphs"], ["[en]P0", "[en]P1", "[en]P2"])
+        self.assertEqual(a["translated_lines"], [["[en]a0"], ["[en]b0", "[en]b1"], ["[en]c0"]])
+
+        # Overlapping window: P1,P2 are hits; only P3 is translated.
+        self.calls.clear()
+        b = self._req(["P1", "P2", "P3"], [["b0", "b1"], ["c0"], ["d0"]])
+        self.assertEqual(b["translated_paragraphs"], ["[en]P1", "[en]P2", "[en]P3"])
+        self.assertEqual(self.calls, [["P3"]])
+        # Same paragraph, identical output regardless of batch window.
+        self.assertEqual(a["translated_paragraphs"][1], b["translated_paragraphs"][0])
+        self.assertEqual(a["translated_lines"][1], b["translated_lines"][0])
+
+        # Exact repeat = full hit, nothing translated.
+        self.calls.clear()
+        c = self._req(["P0", "P1", "P2"], [["a0"], ["b0", "b1"], ["c0"]])
+        self.assertTrue(c["cache_hit"])
+        self.assertEqual(self.calls, [])
+
+    def test_write_guard_skips_empty_and_untranslated(self):
+        import app
+        r = self._req(["PA", "EMPTY", "SAME"], [["a"], ["b"], ["c"]])
+        self.assertEqual(r["translated_paragraphs"], ["[en]PA", "", "SAME"])
+        self.assertIn(app.generate_paragraph_cache_key("es", "en", "PA", ["a"]), self.fake.store)
+        self.assertNotIn(app.generate_paragraph_cache_key("es", "en", "EMPTY", ["b"]), self.fake.store)
+        self.assertNotIn(app.generate_paragraph_cache_key("es", "en", "SAME", ["c"]), self.fake.store)
+
+
+class TestProcessedTranscriptL2Cache(unittest.TestCase):
+    """The cross-worker Redis transcript cache is written ONLY on the
+    already-in-language path (is_correct_lang=True) — never for manual
+    translation, which is provider-state-dependent."""
+
+    def setUp(self):
+        import app
+        self._orig_redis = app.redis_client
+        self._orig_fetch = app.get_cached_transcript
+        self._orig_twa = app.translate_with_alignment
+        self.fake = _FakeRedis()
+        app.redis_client = self.fake
+        app.get_cached_processed_snippets.cache_clear()
+
+    def tearDown(self):
+        import app
+        app.redis_client = self._orig_redis
+        app.get_cached_transcript = self._orig_fetch
+        app.translate_with_alignment = self._orig_twa
+        app.get_cached_processed_snippets.cache_clear()
+
+    def test_writes_on_correct_lang_and_hit_skips_fetch(self):
+        import app
+        app.get_cached_transcript = lambda vid, lang: ([{"text": "hola", "start": 0.0, "duration": 1.0}], True)
+        a1, p1 = app.get_cached_processed_snippets("vidT", "es")
+        key = app._processed_snippets_cache_key("vidT", "es")
+        self.assertIn(key, self.fake.store)
+
+        # A hit must skip the fetch entirely and be byte-identical.
+        app.get_cached_processed_snippets.cache_clear()
+
+        def boom(vid, lang):
+            raise AssertionError("must not fetch on L2 hit")
+
+        app.get_cached_transcript = boom
+        a2, p2 = app.get_cached_processed_snippets("vidT", "es")
+        self.assertEqual((a1, p1), (a2, p2))
+
+    def test_no_write_on_manual_translation(self):
+        import app
+        app.get_cached_transcript = lambda vid, lang: (
+            [{"text": "hello", "start": 0.0, "duration": 1.0},
+             {"text": "there friend", "start": 1.0, "duration": 1.0}], False)
+        app.translate_with_alignment = lambda paras, lines, target, source_lang="auto": (
+            [f"[{target}]{p}" for p in paras],
+            [[f"[{target}]{x}" for x in g] for g in lines])
+        app.get_cached_processed_snippets("vidF", "es")
+        self.assertNotIn(app._processed_snippets_cache_key("vidF", "es"), self.fake.store)
+
+
 if __name__ == "__main__":
     unittest.main()

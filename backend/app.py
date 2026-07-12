@@ -22,11 +22,47 @@ import string
 import random
 import redis
 import requests as http_requests
+from requests.adapters import HTTPAdapter
+try:
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover - very old urllib3
+    Retry = None
 from datetime import datetime, timezone
 from deep_translator import GoogleTranslator
 from functools import lru_cache, wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import jwt
+
+
+def _build_pooled_session(pool_maxsize=16):
+    """A requests.Session with HTTP keep-alive + a connection pool so repeated
+    calls to the same host (DeepL, Supabase) reuse a warm TCP+TLS connection
+    instead of paying a fresh handshake every time (bare requests.post/get opens
+    and discards a Session per call).
+
+    A `connect`-only Retry is the safety guardrail: a pooled connection can go
+    stale between requests, and because callers like _deepl_request swallow
+    exceptions and fall back to a lower-quality engine, a stale-connection error
+    must NOT surface as a translation failure. Retrying only on CONNECT errors
+    (never on read/status) re-establishes a dead pooled socket BEFORE the request
+    body is sent, so there are no duplicate side effects and behavior is
+    no-worse-than today's fresh-connection-per-call.
+    """
+    session = http_requests.Session()
+    if Retry is not None:
+        retry = Retry(total=None, connect=2, read=0, status=0, redirect=0,
+                      backoff_factor=0.2, raise_on_status=False)
+        adapter = HTTPAdapter(pool_connections=pool_maxsize, pool_maxsize=pool_maxsize, max_retries=retry)
+    else:  # pragma: no cover
+        adapter = HTTPAdapter(pool_connections=pool_maxsize, pool_maxsize=pool_maxsize)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+# Reused across all DeepL and Supabase calls. Pool sized comfortably above the
+# translation ThreadPoolExecutor's max_workers (4) plus Supabase concurrency.
+_HTTP_SESSION = _build_pooled_session(pool_maxsize=16)
 
 # Hard timeout (seconds) for a single scraped-translation network call. Without
 # it, a stalled socket in the translators/deep-translator libraries hangs a Flask
@@ -72,6 +108,43 @@ _install_deep_translator_timeout(_TRANSLATE_CALL_TIMEOUT)
 
 app = Flask(__name__)
 CORS(app)
+
+import gzip as _gzip
+
+# Transcript and translate payloads are sizeable JSON (snippets + paragraphs +
+# per-line chunks). gzip-compress responses so the transfer is smaller on slow
+# links — a pure transport win: the client decompresses to byte-identical JSON.
+# Implemented inline (no extra dependency) and guarded so it never alters small
+# payloads, streamed/passthrough responses, or already-encoded content.
+_GZIP_MIN_BYTES = 1024
+
+
+@app.after_request
+def _gzip_response(response):
+    try:
+        accept_encoding = request.headers.get("Accept-Encoding", "")
+        if "gzip" not in accept_encoding.lower():
+            return response
+        if response.direct_passthrough:
+            return response
+        if response.status_code < 200 or response.status_code >= 300:
+            return response
+        if response.headers.get("Content-Encoding"):
+            return response
+        ctype = (response.content_type or "").lower()
+        if "application/json" not in ctype and "text/" not in ctype:
+            return response
+        data = response.get_data()
+        if len(data) < _GZIP_MIN_BYTES:
+            return response
+        compressed = _gzip.compress(data, compresslevel=6)
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = len(compressed)
+        response.headers.add("Vary", "Accept-Encoding")
+    except Exception as exc:  # never let compression break a response
+        print(f"gzip after_request skipped: {exc}")
+    return response
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 REDIS_TTL_SECONDS = int(os.environ.get("REDIS_TTL_SECONDS", "86400"))
@@ -465,6 +538,13 @@ def _looks_like_same_text(sources, translations):
     return same / total >= 0.9
 
 
+def _processed_snippets_cache_key(video_id, from_lang):
+    """Redis key for the cross-worker processed-transcript cache. Hashed so a
+    from_lang containing ':' can't collide with the key structure."""
+    raw = f"{video_id}\x00{(from_lang or '').lower()}"
+    return "transcript:v1:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 @lru_cache(maxsize=100)
 def get_cached_processed_snippets(video_id, from_lang):
     """
@@ -475,7 +555,27 @@ def get_cached_processed_snippets(video_id, from_lang):
     Returns (snippets, paragraphs) where each snippet is
     {source, start, duration, paragraph} and paragraphs is a list of strings
     aligned to the paragraph indices on the snippets.
+
+    Two cache layers sit in front of the (expensive) fetch: the per-process
+    lru_cache (L1, this decorator) and a cross-worker Redis layer (L2, below)
+    that survives worker restarts and is shared across gunicorn workers. The L2
+    write is SCOPED to is_correct_lang=True only — i.e. videos that already carry
+    from_lang subtitles, where the output is a deterministic function of the
+    immutable YouTube subtitles + deterministic grouping and NO translation
+    cascade runs. The manual-translation path is provider-state-dependent and
+    deadline-truncatable, so it is intentionally never written to L2.
     """
+    # L2 read: a hit skips the YouTube fetch + grouping entirely.
+    _redis_key = _processed_snippets_cache_key(video_id, from_lang)
+    if redis_client:
+        try:
+            cached = redis_client.get(_redis_key)
+            if cached:
+                assigned_c, paragraphs_c = json.loads(cached)
+                return assigned_c, paragraphs_c
+        except Exception as e:
+            print(f"Redis transcript get error: {e}. Proceeding without L2 cache.")
+
     source_transcript, is_correct_lang = get_cached_transcript(video_id, from_lang)
 
     cleaned_fragments = []
@@ -523,12 +623,16 @@ def get_cached_processed_snippets(video_id, from_lang):
         # translate paragraphs (for context) and recover aligned per-line text.
         # We keep this pre-translation source (lines_by_paragraph) so we can
         # detect (and repair) any line that failed to translate.
-        lines_by_paragraph = []
-        snippet_idx_by_paragraph = []
-        for p_idx in range(len(paragraphs)):
-            members = [i for i, s in enumerate(assigned) if s["paragraph"] == p_idx]
-            snippet_idx_by_paragraph.append(members)
-            lines_by_paragraph.append([assigned[i]["source"] for i in members])
+        # Single O(n) pass over `assigned` instead of re-scanning it once per
+        # paragraph (which was O(paragraphs * snippets) — quadratic on long
+        # videos). `assigned` is already in paragraph order, so members land in
+        # ascending index order exactly as the old nested scan produced them.
+        snippet_idx_by_paragraph = [[] for _ in range(len(paragraphs))]
+        lines_by_paragraph = [[] for _ in range(len(paragraphs))]
+        for i, s in enumerate(assigned):
+            p_idx = s["paragraph"]
+            snippet_idx_by_paragraph[p_idx].append(i)
+            lines_by_paragraph[p_idx].append(s["source"])
 
         translated_paragraphs, translated_lines = translate_with_alignment(
             paragraphs, lines_by_paragraph, from_lang, source_lang="auto"
@@ -576,6 +680,18 @@ def get_cached_processed_snippets(video_id, from_lang):
                 f"(provider unavailable). Not caching; retry may succeed."
             )
 
+    # L2 write, ONLY for the already-in-language path (no translation ran, so
+    # the result is deterministic and safe to share across workers/restarts).
+    if redis_client and is_correct_lang and assigned:
+        try:
+            redis_client.setex(
+                _redis_key,
+                REDIS_TTL_SECONDS,
+                json.dumps((assigned, paragraphs), ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"Redis transcript setex error: {e}. Continuing without L2 cache.")
+
     return assigned, paragraphs
 
 def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
@@ -591,6 +707,25 @@ def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
     # 1:1 line alignment) rather than blob-split-by-anchor-DP, so old cached
     # results have different (worse) line boundaries — bump to invalidate them.
     return "translate_paragraphs:v6:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+
+
+def generate_paragraph_cache_key(from_lang, to_lang, paragraph, lines):
+    """Per-PARAGRAPH cache key for the alignment path. Because
+    translate_with_alignment._process(p_idx) reads only paragraphs[p_idx] and
+    lines_by_paragraph[p_idx] — no cross-paragraph context on either the DeepL
+    or the fallback path — a paragraph's translation is a pure function of its
+    own text + lines + languages. Keying per paragraph (instead of per batch)
+    means the SAME paragraph reused in a different lookahead/scrub window is a
+    cache HIT rather than a miss, with byte-identical output.
+    """
+    key_payload = {
+        "from": from_lang.lower(),
+        "to": to_lang.lower(),
+        "p": paragraph,
+        "l": lines,
+    }
+    key_raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "translate_para:v1:" + hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
 
 
 _PARAGRAPH_SEPARATOR = "\n\n"
@@ -734,7 +869,7 @@ def _deepl_request(texts, target_lang, source_lang="auto", extra_params=None):
         fields.append((k, v))
 
     try:
-        resp = http_requests.post(
+        resp = _HTTP_SESSION.post(
             DEEPL_API_URL,
             headers={"Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}"},
             data=fields,
@@ -1510,9 +1645,91 @@ def translate_text():
         )
     )
 
-    try:
+    # Whether a single paragraph's translation came back un-translated (source
+    # unchanged) — used to skip caching failed work in BOTH paths.
+    def _para_untranslated(source, translation):
+        s = (source or "").strip()
+        if not s:
+            return False
+        return (translation or "").strip() == s
 
-        cache_key = generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph if want_alignment else None)
+    try:
+        if want_alignment:
+            # PER-PARAGRAPH caching. Each paragraph's translation is a pure
+            # function of (from, to, its own text, its own lines) — verified: no
+            # cross-paragraph context in translate_with_alignment — so caching
+            # per paragraph makes the same paragraph a HIT regardless of which
+            # lookahead/scrub batch it arrives in, with identical output.
+            n = len(paragraphs)
+            para_keys = [
+                generate_paragraph_cache_key(from_lang, to_lang, paragraphs[i], lines_by_paragraph[i])
+                for i in range(n)
+            ]
+
+            cached_by_idx = {}
+            if redis_client:
+                try:
+                    raw_vals = redis_client.mget(para_keys)
+                    for i, raw in enumerate(raw_vals):
+                        if raw:
+                            entry = json.loads(raw)  # {"p": <str>, "l": [<str>...]}
+                            cached_by_idx[i] = entry
+                except Exception as e:
+                    print(f"Redis mget error: {e}. Proceeding without cache.")
+
+            miss_indices = [i for i in range(n) if i not in cached_by_idx]
+            all_hit = not miss_indices
+
+            translated_paragraphs = [""] * n
+            translated_lines = [[] for _ in range(n)]
+
+            # Fill from cache.
+            for i, entry in cached_by_idx.items():
+                translated_paragraphs[i] = entry.get("p", "")
+                tl = entry.get("l", [])
+                translated_lines[i] = tl if isinstance(tl, list) else []
+
+            # Translate only the misses (preserving original indices).
+            if miss_indices:
+                miss_paras = [paragraphs[i] for i in miss_indices]
+                miss_lines = [lines_by_paragraph[i] for i in miss_indices]
+                m_paras, m_lines = translate_with_alignment(
+                    miss_paras, miss_lines, to_lang, from_lang
+                )
+                writes = {}
+                for j, i in enumerate(miss_indices):
+                    p_txt = m_paras[j] if j < len(m_paras) else ""
+                    l_chunks = m_lines[j] if j < len(m_lines) else []
+                    translated_paragraphs[i] = p_txt
+                    translated_lines[i] = l_chunks
+                    # Cache only genuinely-translated paragraphs (skip empty /
+                    # deadline-truncated / source-identical) so we never pin a
+                    # failed or un-translated paragraph for the whole TTL. This
+                    # is a per-paragraph version of the old whole-batch guard,
+                    # and strictly better: one bad paragraph no longer blocks
+                    # caching its good siblings.
+                    if (p_txt or "").strip() and not _para_untranslated(paragraphs[i], p_txt):
+                        writes[para_keys[i]] = json.dumps({"p": p_txt, "l": l_chunks}, ensure_ascii=False)
+                if redis_client and writes:
+                    try:
+                        pipe = redis_client.pipeline()
+                        for k, v in writes.items():
+                            pipe.setex(k, REDIS_TTL_SECONDS, v)
+                        pipe.execute()
+                    except Exception as e:
+                        print(f"Redis per-paragraph setex error: {e}. Continuing without cache.")
+
+            payload = {
+                "translated_paragraphs": translated_paragraphs,
+                "translated_lines": translated_lines,
+                "cache_hit": all_hit,
+            }
+            return jsonify(payload)
+
+        # Non-alignment path: keep the whole-batch key. translate_paragraphs
+        # joins all paragraphs for cross-paragraph context, so its output IS
+        # batch-dependent and must not be split into per-paragraph keys.
+        cache_key = generate_cache_key(from_lang, to_lang, paragraphs, None)
         cached = None
         if redis_client:
             try:
@@ -1525,17 +1742,8 @@ def translate_text():
             payload["cache_hit"] = True
             return jsonify(payload)
 
-        if want_alignment:
-            translated_paragraphs, translated_lines = translate_with_alignment(
-                paragraphs, lines_by_paragraph, to_lang, from_lang
-            )
-            payload = {
-                "translated_paragraphs": translated_paragraphs,
-                "translated_lines": translated_lines,
-            }
-        else:
-            translated_paragraphs = translate_paragraphs(paragraphs, to_lang, from_lang)
-            payload = {"translated_paragraphs": translated_paragraphs}
+        translated_paragraphs = translate_paragraphs(paragraphs, to_lang, from_lang)
+        payload = {"translated_paragraphs": translated_paragraphs}
 
         # Don't cache a failed translation. When the whole cascade fails,
         # translate_paragraphs returns the source text unchanged; caching that
@@ -1576,7 +1784,7 @@ SUPABASE_TIMEOUT = (5, 15)
 
 def _sb_get(table, params=None):
     """GET from Supabase REST API."""
-    resp = http_requests.get(f"{SUPABASE_REST_URL}/{table}", headers=SUPABASE_HEADERS, params=params or {}, timeout=SUPABASE_TIMEOUT)
+    resp = _HTTP_SESSION.get(f"{SUPABASE_REST_URL}/{table}", headers=SUPABASE_HEADERS, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase GET {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -1584,7 +1792,7 @@ def _sb_get(table, params=None):
 def _sb_post(table, data, extra_headers=None, params=None):
     """POST to Supabase REST API."""
     headers = {**SUPABASE_HEADERS, **(extra_headers or {})}
-    resp = http_requests.post(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {}, timeout=SUPABASE_TIMEOUT)
+    resp = _HTTP_SESSION.post(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase POST {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -1593,7 +1801,7 @@ def _sb_post(table, data, extra_headers=None, params=None):
 def _sb_patch(table, data, params=None):
     """PATCH (update) rows in Supabase REST API."""
     headers = {**SUPABASE_HEADERS}
-    resp = http_requests.patch(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {}, timeout=SUPABASE_TIMEOUT)
+    resp = _HTTP_SESSION.patch(f"{SUPABASE_REST_URL}/{table}", headers=headers, json=data, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase PATCH {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -1602,7 +1810,7 @@ def _sb_patch(table, data, params=None):
 def _sb_delete(table, params=None):
     """DELETE rows from Supabase REST API."""
     headers = {**SUPABASE_HEADERS}
-    resp = http_requests.delete(f"{SUPABASE_REST_URL}/{table}", headers=headers, params=params or {}, timeout=SUPABASE_TIMEOUT)
+    resp = _HTTP_SESSION.delete(f"{SUPABASE_REST_URL}/{table}", headers=headers, params=params or {}, timeout=SUPABASE_TIMEOUT)
     if not resp.ok:
         raise Exception(f"Supabase DELETE {table} failed ({resp.status_code}): {resp.text}")
     return resp.json()
@@ -2573,15 +2781,16 @@ def clear_translation_cache():
         })
 
     try:
-        # A single glob covers every version prefix (v2, v5, …); the previous
-        # second pattern was a strict subset of the first and thus redundant.
         # KEYS is a blocking O(N) scan — fine for an occasional admin flush,
-        # but use SCAN so we don't stall Redis on large keyspaces.
+        # but use SCAN so we don't stall Redis on large keyspaces. Clear both the
+        # translation cache (whole-batch + per-paragraph) and the cross-worker
+        # processed-transcript cache so the version prefixes are invalidatable.
         total_deleted = 0
-        for key in redis_client.scan_iter(match="translate_paragraphs:*", count=500):
-            total_deleted += redis_client.delete(key)
+        for pattern in ("translate_paragraphs:*", "translate_para:*", "transcript:v1:*"):
+            for key in redis_client.scan_iter(match=pattern, count=500):
+                total_deleted += redis_client.delete(key)
         return jsonify({
-            "message": f"Cleared {total_deleted} translation cache entries and in-process transcript caches",
+            "message": f"Cleared {total_deleted} translation/transcript cache entries and in-process transcript caches",
             "entries_deleted": total_deleted,
         })
     except Exception as e:

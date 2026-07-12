@@ -790,46 +790,27 @@ function App() {
   // ---------------------------------------------------------
   // LAZY LOADING PARAGRAPH TRANSLATIONS (Fetch just-in-time)
   // ---------------------------------------------------------
-  useEffect(() => {
-    if (transcript.length === 0 || paragraphs.length === 0) return;
+  // Fetch a set of paragraph indices in a single /api/translate request and
+  // fold the results into state. Extracted so the CURRENT paragraph and the
+  // lookahead paragraphs can be requested SEPARATELY: the current paragraph is
+  // what gates the first visible line, so issuing it on its own means it renders
+  // as soon as it's ready instead of waiting on the slowest paragraph in a
+  // combined batch. Output is unchanged — each paragraph is translated
+  // independently on the server, so splitting a batch only changes timing.
+  const fetchParagraphGroup = useCallback((indices, sessionId) => {
+    if (indices.length === 0) return;
 
-    const currentLine = transcript[currentLineIndex];
-    if (!currentLine) return;
+    const paragraphTextsToFetch = indices.map((p) => paragraphs[p]);
+    const linesToFetch = indices.map((p) =>
+      transcript.filter((s) => (s.paragraph ?? 0) === p).map((s) => s.source || '')
+    );
 
-    // Work out which paragraph indices we want translated next — the current
-    // paragraph plus a small lookahead of paragraphs that follow.
-    const currentParagraphIdx = currentLine.paragraph ?? 0;
-    const PARAGRAPH_LOOKAHEAD = 2;
-    const paragraphIndicesToFetch = [];
-    const paragraphTextsToFetch = [];
-    const linesToFetch = [];
-
-    for (let p = currentParagraphIdx; p <= currentParagraphIdx + PARAGRAPH_LOOKAHEAD && p < paragraphs.length; p++) {
-      // Fetch a paragraph if we don't already have a translation for it and it
-      // isn't currently in flight. A previously 'failed' paragraph has no entry
-      // in translatedParagraphs, so it becomes eligible again whenever this
-      // effect re-runs (e.g. after a retry nonce bump or line change).
-      if (!hasOwn(translatedParagraphs, p) && !fetchingRef.current.has(p)) {
-        paragraphIndicesToFetch.push(p);
-        paragraphTextsToFetch.push(paragraphs[p]);
-        linesToFetch.push(
-          transcript.filter((s) => (s.paragraph ?? 0) === p).map((s) => s.source || '')
-        );
-        fetchingRef.current.add(p);
-      }
-    }
-
-    if (paragraphTextsToFetch.length === 0) return;
-
-    const sessionId = activePlayerSessionRef.current;
     const controller = new AbortController();
-
-    setTranslationStatus(prev => {
+    setTranslationStatus((prev) => {
       const updated = { ...prev };
-      paragraphIndicesToFetch.forEach(idx => { updated[idx] = 'pending'; });
+      indices.forEach((idx) => { updated[idx] = 'pending'; });
       return updated;
     });
-
     translationRequestControllersRef.current.add(controller);
 
     axios.post(`${API_BASE_URL}/api/translate`, {
@@ -839,54 +820,82 @@ function App() {
       to_lang: toLang,
     }, {
       signal: controller.signal,
-    }).then(response => {
+    }).then((response) => {
       if (activePlayerSessionRef.current !== sessionId) return;
 
       const newTranslations = response.data.translated_paragraphs || [];
       const newLineChunks = response.data.translated_lines || [];
 
-      setTranslatedParagraphs(prev => {
+      setTranslatedParagraphs((prev) => {
         const updated = { ...prev };
-        paragraphIndicesToFetch.forEach((idx, i) => {
-          updated[idx] = newTranslations[i] || '';
+        indices.forEach((idx, i) => { updated[idx] = newTranslations[i] || ''; });
+        return updated;
+      });
+
+      setTranslatedLinesByParagraph((prev) => {
+        const updated = { ...prev };
+        indices.forEach((idx, i) => {
+          if (Array.isArray(newLineChunks[i])) updated[idx] = newLineChunks[i];
         });
         return updated;
       });
 
-      setTranslatedLinesByParagraph(prev => {
+      setTranslationStatus((prev) => {
         const updated = { ...prev };
-        paragraphIndicesToFetch.forEach((idx, i) => {
-          if (Array.isArray(newLineChunks[i])) {
-            updated[idx] = newLineChunks[i];
-          }
-        });
+        indices.forEach((idx) => { updated[idx] = 'ready'; fetchingRef.current.delete(idx); });
         return updated;
       });
-
-      setTranslationStatus(prev => {
-        const updated = { ...prev };
-        paragraphIndicesToFetch.forEach(idx => {
-          updated[idx] = 'ready';
-          fetchingRef.current.delete(idx);
-        });
-        return updated;
-      });
-    }).catch(err => {
+    }).catch((err) => {
       if (isCanceledRequestError(err) || activePlayerSessionRef.current !== sessionId) return;
 
       console.error("Failed to fetch paragraph translation:", err);
-      setTranslationStatus(prev => {
+      setTranslationStatus((prev) => {
         const updated = { ...prev };
-        paragraphIndicesToFetch.forEach(idx => {
-          updated[idx] = 'failed';
-          fetchingRef.current.delete(idx);
-        });
+        indices.forEach((idx) => { updated[idx] = 'failed'; fetchingRef.current.delete(idx); });
         return updated;
       });
     }).finally(() => {
       translationRequestControllersRef.current.delete(controller);
     });
-  }, [currentLineIndex, transcript, paragraphs, toLang, fromLang, translatedParagraphs, translationRetryNonce]);
+  }, [paragraphs, transcript, fromLang, toLang]);
+
+  useEffect(() => {
+    if (transcript.length === 0 || paragraphs.length === 0) return;
+
+    const currentLine = transcript[currentLineIndex];
+    if (!currentLine) return;
+
+    // The current paragraph gates the first visible line; the following few are
+    // a prefetch lookahead. Fetch a paragraph only if we don't already have it
+    // and it isn't in flight. A previously 'failed' paragraph has no entry in
+    // translatedParagraphs, so it becomes eligible again on re-run (retry nonce
+    // bump or line change).
+    const currentParagraphIdx = currentLine.paragraph ?? 0;
+    const PARAGRAPH_LOOKAHEAD = 2;
+
+    const eligible = (p) =>
+      p < paragraphs.length && !hasOwn(translatedParagraphs, p) && !fetchingRef.current.has(p);
+
+    const currentGroup = [];
+    if (eligible(currentParagraphIdx)) currentGroup.push(currentParagraphIdx);
+
+    const lookaheadGroup = [];
+    for (let p = currentParagraphIdx + 1; p <= currentParagraphIdx + PARAGRAPH_LOOKAHEAD; p++) {
+      if (eligible(p)) lookaheadGroup.push(p);
+    }
+
+    if (currentGroup.length === 0 && lookaheadGroup.length === 0) return;
+
+    // Reserve in-flight guards before issuing requests.
+    [...currentGroup, ...lookaheadGroup].forEach((p) => fetchingRef.current.add(p));
+
+    const sessionId = activePlayerSessionRef.current;
+    // Current paragraph on its own request (unblocks the first line ASAP);
+    // lookahead as a separate background request. With per-paragraph server
+    // caching, splitting adds no duplicate work.
+    fetchParagraphGroup(currentGroup, sessionId);
+    fetchParagraphGroup(lookaheadGroup, sessionId);
+  }, [currentLineIndex, transcript, paragraphs, toLang, fromLang, translatedParagraphs, translationRetryNonce, fetchParagraphGroup]);
 
   // ---------------------------------------------------------
   // THE BRAKE PEDAL (Auto-Pause & Sync Logic)
