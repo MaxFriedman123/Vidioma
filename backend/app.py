@@ -1701,13 +1701,30 @@ def upsert_progress():
         if not video_id:
             return jsonify({"error": "Failed to resolve video"}), 500
 
+        # Videos always restart from the beginning on entry, so we no longer keep
+        # a "resume point". Instead current_line_index is a high-water mark: the
+        # FARTHEST line the user has ever reached in this video/language pair. Read
+        # the previous value and only ever advance it, so starting over and
+        # quitting early can't shrink the recorded progress shown on the dashboard.
+        existing = _sb_get("user_progress", {
+            "select": "current_line_index,total_lines",
+            "user_id": f"eq.{g.user_id}",
+            "video_id": f"eq.{video_id}",
+            "transcript_language": f"eq.{transcript_language}",
+            "translation_language": f"eq.{translation_language}",
+            "limit": "1",
+        })
+        prev = existing[0] if existing else None
+        prev_max = _non_negative_int(prev.get("current_line_index", 0)) if prev else 0
+        farthest_line = max(prev_max, current_line_index)
+
         row = {
             "user_id": g.user_id,
             "video_id": video_id,
             "transcript_language": transcript_language,
             "translation_language": translation_language,
-            "current_line_index": current_line_index,
-            "total_lines": total_lines,
+            "current_line_index": farthest_line,
+            "total_lines": total_lines or (_non_negative_int(prev.get("total_lines", 0)) if prev else 0),
             "last_accessed_at": datetime.now(timezone.utc).isoformat(),
         }
 

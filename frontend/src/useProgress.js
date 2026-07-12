@@ -28,17 +28,30 @@ export function useProgress() {
     (payload) => {
       // payload: { youtube_id, transcript_language, translation_language, current_line_index, total_lines, title? }
 
-      // Always save to localStorage (cheap insurance for both guests and auth users)
+      // Always save to localStorage (cheap insurance for both guests and auth users).
+      // current_line_index is a farthest-reached high-water mark now that videos
+      // always restart from the beginning, so never let it move backwards: merge
+      // against any previously stored value and keep the larger line index.
       const key = _storageKey(
         payload.youtube_id,
         payload.transcript_language,
         payload.translation_language
       );
-      localStorage.setItem(key, JSON.stringify(payload));
+      let toStore = payload;
+      try {
+        const prev = JSON.parse(localStorage.getItem(key));
+        const prevLine = prev?.current_line_index || 0;
+        if (prevLine > (payload.current_line_index || 0)) {
+          toStore = { ...payload, current_line_index: prevLine };
+        }
+      } catch {
+        // no prior value / unparseable — store the payload as-is
+      }
+      localStorage.setItem(key, JSON.stringify(toStore));
 
       // If authenticated, also debounce-send to the backend
       if (isAuthenticated && accessToken) {
-        latestPayloadRef.current = payload;
+        latestPayloadRef.current = toStore;
 
         if (debounceTimerRef.current) {
           clearTimeout(debounceTimerRef.current);

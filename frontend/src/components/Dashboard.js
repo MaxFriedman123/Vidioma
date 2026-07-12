@@ -104,7 +104,6 @@ export default function Dashboard({ onSelectVideo }) {
                   youtubeId: video.youtube_id,
                   transcriptLanguage: item.transcript_language,
                   translationLanguage: item.translation_language,
-                  startLine: item.current_line_index,
                 })
               }
             >
@@ -131,7 +130,7 @@ export default function Dashboard({ onSelectVideo }) {
                   />
                 </div>
                 <p className="dashboard-card-stat">
-                  {item.current_line_index} / {item.total_lines} lines ({pct}%)
+                  Farthest: {item.current_line_index} / {item.total_lines} lines ({pct}%)
                 </p>
                 <p className="dashboard-card-time">
                   Last watched: {timeAgo(item.last_accessed_at)}

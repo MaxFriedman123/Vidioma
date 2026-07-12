@@ -261,7 +261,10 @@ describe('Playback overlay behavior', () => {
 
     fireEvent.click(await screen.findByText('Tap to Start'));
 
-    expect(mockLatestPlayer.seekTo).toHaveBeenCalledWith(5, true);
+    // Videos always start from the beginning now (line 0), so a manual tap
+    // attempts playback but does not seek to any saved resume position.
+    expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
+    expect(mockLatestPlayer.seekTo).not.toHaveBeenCalled();
 
     await act(async () => {
       jest.advanceTimersByTime(3200);

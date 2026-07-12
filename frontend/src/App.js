@@ -242,7 +242,7 @@ const getBestWindowSimilarity = (userInput, paragraphTranslation, sourceLine) =>
 
 function App() {
   const { isAuthenticated, loading: authLoading, passwordRecoveryPending, clearPasswordRecovery, userProfile, profileLoading, accessToken } = useAuth();
-  const { saveProgress, loadProgress, flushProgress } = useProgress();
+  const { saveProgress, flushProgress } = useProgress();
   // Mirror the access token into a ref so fire-and-forget assignment saves in
   // callbacks/intervals always use the current token without re-subscribing.
   const accessTokenRef = useRef(accessToken);
@@ -530,7 +530,10 @@ function App() {
     });
     const controller = new AbortController();
     transcriptRequestControllerRef.current = controller;
-    setCurrentLineIndex(0); // Reset to start — may be overridden by loadProgress
+    // Entering a video always starts from the beginning, even if it's been
+    // watched before. (Saved progress is still tracked as a farthest-reached
+    // high-water mark for the dashboard, but we no longer resume from it.)
+    setCurrentLineIndex(0);
     try {
       const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
         url: requestUrl,
@@ -547,21 +550,7 @@ function App() {
       const snippets = response.data.snippets;
       setTranscript(snippets);
       setParagraphs(response.data.paragraphs || []);
-
-      // Try to resume from saved progress
-      const savedLine = await loadProgress(extractedId, fromLang, toLang);
-      if (activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-
-      // Clamp: if saved progress says the user finished the video previously
-      // (savedLine >= snippets.length), restart from the beginning rather than
-      // leave currentLineIndex out of range (which would show "Sentence 6 of 5").
-      if (savedLine > 0 && savedLine < snippets.length) {
-        setCurrentLineIndex(savedLine);
-      } else {
-        setCurrentLineIndex(0);
-      }
+      setCurrentLineIndex(0);
     } catch (error) {
       if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) {
         return;
@@ -585,7 +574,7 @@ function App() {
   };
 
   // ── Launch directly from Dashboard card ───────────────────────────
-  const handleDashboardSelect = async ({ youtubeId, transcriptLanguage, translationLanguage, startLine }) => {
+  const handleDashboardSelect = async ({ youtubeId, transcriptLanguage, translationLanguage }) => {
     const requestUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
 
     setFromLang(transcriptLanguage);
@@ -615,9 +604,8 @@ function App() {
       const snippets = response.data.snippets;
       setTranscript(snippets);
       setParagraphs(response.data.paragraphs || []);
-      // Clamp startLine: if finished (>= total), restart from 0
-      const safeStart = (startLine && startLine < snippets.length) ? startLine : 0;
-      setCurrentLineIndex(safeStart);
+      // Always start from the beginning, even when relaunched from the dashboard.
+      setCurrentLineIndex(0);
     } catch (error) {
       if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) {
         return;

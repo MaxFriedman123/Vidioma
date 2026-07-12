@@ -160,7 +160,7 @@ export default function ClassDashboard({ onSelectClass, onCreateAssignment }) {
               aria-haspopup="true"
               aria-expanded={createMenuOpen}
             >
-              + Create ▾
+              + Create
             </button>
             {createMenuOpen && (
               <div className="create-dropdown-menu">
