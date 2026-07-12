@@ -106,6 +106,90 @@ def _install_deep_translator_timeout(default_timeout):
 
 _install_deep_translator_timeout(_TRANSLATE_CALL_TIMEOUT)
 
+
+# ── Faster cold transcript fetch (skip the watch-page round-trip) ──────────
+# A cold youtube-transcript-api fetch does 3 sequential round-trips: GET the
+# ~1MB watch HTML (only to regex out the innertube API key), POST the innertube
+# player API, then GET the caption XML. The first hop is pure overhead — the
+# innertube ?key= param is ignored, so we can POST it directly with a constant
+# key. Measured ~6x faster on the metadata step, returning byte-identical
+# caption tracks. In prod all hops go through the (slow, rotating) proxy, so
+# dropping one is a real cold-load win.
+#
+# This is a FAST-PATH-WITH-FALLBACK, never a replacement: on ANY anomaly (block,
+# no captions, consent/login gating, parse error, or a library-shape change) we
+# transparently fall back to the UNMODIFIED library path on the SAME http_client
+# (same proxy/rotation), so a genuinely blocked or consent-walled IP still gets
+# the watch-page handling and IP rotation. The fast path can only make a
+# would-succeed fetch faster; it can never turn success into failure.
+_INNERTUBE_CONST_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+
+# Build the fast fetcher class only if the vendored library exposes exactly the
+# internals we rely on (feature detection). If anything is missing/renamed by a
+# library upgrade, _FastTranscriptListFetcher stays None and we use the stock
+# API untouched.
+_FastTranscriptListFetcher = None
+try:
+    from youtube_transcript_api import _transcripts as _yta_transcripts
+    from youtube_transcript_api import _settings as _yta_settings
+    from youtube_transcript_api._errors import (
+        RequestBlocked as _YTARequestBlocked,
+        IpBlocked as _YTAIpBlocked,
+    )
+
+    _StockFetcher = _yta_transcripts.TranscriptListFetcher
+    _fast_capable = (
+        hasattr(_yta_settings, "INNERTUBE_API_URL")
+        and hasattr(_yta_settings, "INNERTUBE_CONTEXT")
+        and hasattr(_StockFetcher, "_fetch_innertube_data")
+        and hasattr(_StockFetcher, "_extract_captions_json")
+        and hasattr(_StockFetcher, "_fetch_captions_json")
+    )
+
+    if _fast_capable:
+        class _FastTranscriptListFetcher(_StockFetcher):
+            """Overrides ONLY _fetch_captions_json to try the innertube POST
+            directly (skipping the watch-page GET). Everything else — the http
+            client, proxy config, block-retry loop, TranscriptList.build, XML
+            parsing, translate() — is the stock library, unchanged."""
+
+            def _fetch_captions_json(self, video_id, try_number=0):
+                # Blocks MUST propagate so the library's retries_when_blocked
+                # rotation loop fires — never swallow them into the fallback.
+                try:
+                    innertube = self._fetch_innertube_data(video_id, _INNERTUBE_CONST_KEY)
+                    captions = self._extract_captions_json(innertube, video_id)
+                    # Silent-degradation guard: a blocked/consent-gated IP can
+                    # return 200 with no usable tracks. Only trust the fast path
+                    # when it actually produced caption tracks; otherwise fall
+                    # through to the stock watch-page path (consent handling).
+                    if captions and captions.get("captionTracks"):
+                        return captions
+                except (_YTARequestBlocked, _YTAIpBlocked):
+                    raise
+                except Exception as exc:
+                    print(f"Fast transcript fetch fell back to stock path: {type(exc).__name__}: {str(exc)[:80]}")
+                # Fallback: the unmodified library path on the SAME client/proxy.
+                return super()._fetch_captions_json(video_id, try_number=try_number)
+except Exception as _exc:  # pragma: no cover - never block startup on this
+    print(f"Warning: fast transcript fetcher unavailable ({_exc}); using stock library path.")
+    _FastTranscriptListFetcher = None
+
+
+def _install_fast_fetcher(api):
+    """Swap a YouTubeTranscriptApi's fetcher for the fast one, reusing its
+    existing http_client + proxy_config so proxy/rotation/retry are unchanged.
+    No-op (returns the stock api) if the fast fetcher isn't available."""
+    if _FastTranscriptListFetcher is None:
+        return api
+    try:
+        stock = api._fetcher
+        api._fetcher = _FastTranscriptListFetcher(stock._http_client, proxy_config=stock._proxy_config)
+    except Exception as exc:
+        print(f"Warning: could not install fast fetcher ({exc}); using stock path.")
+    return api
+
+
 app = Flask(__name__)
 CORS(app)
 
@@ -356,21 +440,12 @@ def get_cached_transcript(video_id, from_lang):
         return fallback.fetch(), False
 
 
-    # --- Main execution flow: Direct fetch first, Proxy fallback second ---
-
-    # 1. ATTEMPT FAST DIRECT CONNECTION FIRST
-    try:
-        print(f"Attempting direct fetch for {video_id} in {from_lang}...")
-        direct_api = YouTubeTranscriptApi()
-        return attempt_fetch(direct_api)
-
-    except Exception as e:
-        print(f"Direct fetch failed, falling back to proxy: {e}")
-
-        # 2. FALLBACK TO ROTATING RESIDENTIAL PROXY IF BLOCKED OR FAILED.
-        # YouTube blocks datacenter IPs (e.g. Render), so in prod this fallback
-        # is the path that actually works — direct fetch above almost always
-        # fails there.
+    def proxy_fetch():
+        """Fetch through the rotating residential proxy with a bounded retry
+        loop. YouTube blocks datacenter IPs (e.g. Render), so this is the path
+        that actually works in prod. Extracted so it can be called both as the
+        fallback after a failed direct attempt AND as the sole path when direct
+        is skipped — the creds check and retry loop are never dropped."""
         proxy_username = os.environ.get("WEBSHARE_USERNAME")
         proxy_password = os.environ.get("WEBSHARE_PASSWORD")
 
@@ -393,7 +468,7 @@ def get_cached_transcript(video_id, from_lang):
             http_url = f"http://{proxy_username}-rotate:{proxy_password}@p.webshare.io:80/"
             proxy_config = GenericProxyConfig(http_url=http_url, https_url=http_url)
 
-        proxy_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        proxy_api = _install_fast_fetcher(YouTubeTranscriptApi(proxy_config=proxy_config))
 
         # Bounded server-side retry on the proxy path. The Webshare rotating
         # config already retries a blocked IP internally, but other transient
@@ -412,6 +487,28 @@ def get_cached_transcript(video_id, from_lang):
                 if attempt < 2:
                     time.sleep(0.6 * (attempt + 1))
         raise last_exc
+
+    # --- Main execution flow: Direct fetch first, Proxy fallback second ---
+
+    # On hosts where YouTube blocks the server IP (Render and other datacenters),
+    # the direct attempt fails ~100% of the time, so paying for it just adds a
+    # guaranteed-failing round-trip before the proxy path that actually works.
+    # Skip it when FORCE_PROXY=1 or RENDER is set. Default (unset) keeps today's
+    # exact direct-first behavior so local dev / non-prod never regresses.
+    _force_proxy = os.environ.get("FORCE_PROXY") == "1" or os.environ.get("RENDER")
+    if _force_proxy:
+        return proxy_fetch()
+
+    # 1. ATTEMPT FAST DIRECT CONNECTION FIRST
+    try:
+        print(f"Attempting direct fetch for {video_id} in {from_lang}...")
+        direct_api = _install_fast_fetcher(YouTubeTranscriptApi())
+        return attempt_fetch(direct_api)
+
+    except Exception as e:
+        print(f"Direct fetch failed, falling back to proxy: {e}")
+        # 2. FALLBACK TO ROTATING RESIDENTIAL PROXY IF BLOCKED OR FAILED.
+        return proxy_fetch()
 
 _SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*\s*$')
 # Paragraph sizing: translation quality benefits from context, but the unit

@@ -2,7 +2,10 @@ Flask
 flask-cors
 deep-translator
 translators
-youtube-transcript-api
+# Pinned: the cold-load fast-fetch path in app.py feature-detects this library's
+# internals (innertube fetcher) and falls back to the stock path if they change,
+# but pinning keeps the fast path valid and behavior reproducible across deploys.
+youtube-transcript-api==1.2.4
 redis
 requests[socks]
 gunicorn
