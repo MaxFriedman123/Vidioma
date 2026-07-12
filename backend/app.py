@@ -5,15 +5,6 @@ load_dotenv()  # Load environment variables from .env file
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig
-try:
-    # Purpose-built config for Webshare rotating RESIDENTIAL proxies: uses the
-    # correct HTTP endpoint (p.webshare.io:80), rotates IPs automatically, and
-    # retries when an IP is blocked — the reliable way past YouTube's
-    # datacenter-IP blocking on hosts like Render.
-    from youtube_transcript_api.proxies import WebshareProxyConfig
-except Exception:  # pragma: no cover - older library versions
-    WebshareProxyConfig = None
 import re
 import json
 import hashlib
@@ -113,15 +104,14 @@ _install_deep_translator_timeout(_TRANSLATE_CALL_TIMEOUT)
 # player API, then GET the caption XML. The first hop is pure overhead — the
 # innertube ?key= param is ignored, so we can POST it directly with a constant
 # key. Measured ~6x faster on the metadata step, returning byte-identical
-# caption tracks. In prod all hops go through the (slow, rotating) proxy, so
-# dropping one is a real cold-load win.
+# caption tracks.
 #
 # This is a FAST-PATH-WITH-FALLBACK, never a replacement: on ANY anomaly (block,
 # no captions, consent/login gating, parse error, or a library-shape change) we
-# transparently fall back to the UNMODIFIED library path on the SAME http_client
-# (same proxy/rotation), so a genuinely blocked or consent-walled IP still gets
-# the watch-page handling and IP rotation. The fast path can only make a
-# would-succeed fetch faster; it can never turn success into failure.
+# transparently fall back to the UNMODIFIED library path on the SAME http_client,
+# so a genuinely blocked or consent-walled IP still gets the watch-page handling.
+# The fast path can only make a would-succeed fetch faster; it can never turn
+# success into failure.
 _INNERTUBE_CONST_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 # Build the fast fetcher class only if the vendored library exposes exactly the
@@ -150,8 +140,8 @@ try:
         class _FastTranscriptListFetcher(_StockFetcher):
             """Overrides ONLY _fetch_captions_json to try the innertube POST
             directly (skipping the watch-page GET). Everything else — the http
-            client, proxy config, block-retry loop, TranscriptList.build, XML
-            parsing, translate() — is the stock library, unchanged."""
+            client, block-retry loop, TranscriptList.build, XML parsing,
+            translate() — is the stock library, unchanged."""
 
             def _fetch_captions_json(self, video_id, try_number=0):
                 # Blocks MUST propagate so the library's retries_when_blocked
@@ -169,7 +159,7 @@ try:
                     raise
                 except Exception as exc:
                     print(f"Fast transcript fetch fell back to stock path: {type(exc).__name__}: {str(exc)[:80]}")
-                # Fallback: the unmodified library path on the SAME client/proxy.
+                # Fallback: the unmodified library path on the SAME http client.
                 return super()._fetch_captions_json(video_id, try_number=try_number)
 except Exception as _exc:  # pragma: no cover - never block startup on this
     print(f"Warning: fast transcript fetcher unavailable ({_exc}); using stock library path.")
@@ -178,7 +168,7 @@ except Exception as _exc:  # pragma: no cover - never block startup on this
 
 def _install_fast_fetcher(api):
     """Swap a YouTubeTranscriptApi's fetcher for the fast one, reusing its
-    existing http_client + proxy_config so proxy/rotation/retry are unchanged.
+    existing http_client + proxy_config so its retry behavior is unchanged.
     No-op (returns the stock api) if the fast fetcher isn't available."""
     if _FastTranscriptListFetcher is None:
         return api
@@ -376,8 +366,17 @@ def extract_video_id(url):
 @lru_cache(maxsize=100)
 def get_cached_transcript(video_id, from_lang):
     """
-    Fetch a transcript for the requested language. Attempts a fast direct connection first,
-    falling back to a rotating proxy if YouTube blocks the request.
+    Fetch a transcript for the requested language via a direct server-side
+    connection to YouTube.
+
+    NOTE: This server-side fetch is only a FALLBACK. Captions are normally
+    fetched in the user's browser (a residential IP YouTube doesn't block) and
+    posted to /api/transcript as client_snippets — see the client-caption path
+    and README "Caption Fetching". YouTube IP-blocks datacenter/cloud egress
+    (Render, AWS, GCP), so this direct fetch can fail on such hosts; it used to
+    fall back to a paid Webshare rotating proxy, which was removed once the
+    browser path made it unnecessary (see docs/webshare-proxy-removed.md to
+    re-add it).
 
     Returns:
         (transcript_data, is_correct_lang)
@@ -439,76 +438,12 @@ def get_cached_transcript(video_id, from_lang):
         fallback = sorted(available_transcripts, key=sort_key)[0]
         return fallback.fetch(), False
 
-
-    def proxy_fetch():
-        """Fetch through the rotating residential proxy with a bounded retry
-        loop. YouTube blocks datacenter IPs (e.g. Render), so this is the path
-        that actually works in prod. Extracted so it can be called both as the
-        fallback after a failed direct attempt AND as the sole path when direct
-        is skipped — the creds check and retry loop are never dropped."""
-        proxy_username = os.environ.get("WEBSHARE_USERNAME")
-        proxy_password = os.environ.get("WEBSHARE_PASSWORD")
-
-        if not proxy_username or not proxy_password:
-            raise ValueError("Proxy credentials are not configured and direct fetch failed.")
-
-        if WebshareProxyConfig is not None:
-            # Rotating residential proxies over Webshare's HTTP endpoint
-            # (p.webshare.io:80). This auto-rotates IPs and retries when an IP
-            # is blocked. Passing the raw username is correct — the config adds
-            # the "-rotate" suffix itself.
-            proxy_config = WebshareProxyConfig(
-                proxy_username=proxy_username,
-                proxy_password=proxy_password,
-            )
-        else:
-            # Fallback for older library versions without WebshareProxyConfig:
-            # use the HTTP rotating endpoint (NOT socks5:1080, which targets the
-            # wrong product/port and does not rotate).
-            http_url = f"http://{proxy_username}-rotate:{proxy_password}@p.webshare.io:80/"
-            proxy_config = GenericProxyConfig(http_url=http_url, https_url=http_url)
-
-        proxy_api = _install_fast_fetcher(YouTubeTranscriptApi(proxy_config=proxy_config))
-
-        # Bounded server-side retry on the proxy path. The Webshare rotating
-        # config already retries a blocked IP internally, but other transient
-        # upstream errors (connection resets, sporadic 5xx, a cold first proxy
-        # handshake) can still surface on the first try and then succeed on the
-        # next — which is exactly the "fails once, works on retry" symptom.
-        # Retrying here means the user usually doesn't have to.
-        import time
-        last_exc = None
-        for attempt in range(3):
-            try:
-                return attempt_fetch(proxy_api)
-            except Exception as proxy_exc:
-                last_exc = proxy_exc
-                print(f"Proxy fetch attempt {attempt + 1} failed: {proxy_exc}")
-                if attempt < 2:
-                    time.sleep(0.6 * (attempt + 1))
-        raise last_exc
-
-    # --- Main execution flow: Direct fetch first, Proxy fallback second ---
-
-    # On hosts where YouTube blocks the server IP (Render and other datacenters),
-    # the direct attempt fails ~100% of the time, so paying for it just adds a
-    # guaranteed-failing round-trip before the proxy path that actually works.
-    # Skip it when FORCE_PROXY=1 or RENDER is set. Default (unset) keeps today's
-    # exact direct-first behavior so local dev / non-prod never regresses.
-    _force_proxy = os.environ.get("FORCE_PROXY") == "1" or os.environ.get("RENDER")
-    if _force_proxy:
-        return proxy_fetch()
-
-    # 1. ATTEMPT FAST DIRECT CONNECTION FIRST
-    try:
-        print(f"Attempting direct fetch for {video_id} in {from_lang}...")
-        direct_api = _install_fast_fetcher(YouTubeTranscriptApi())
-        return attempt_fetch(direct_api)
-
-    except Exception as e:
-        print(f"Direct fetch failed, falling back to proxy: {e}")
-        # 2. FALLBACK TO ROTATING RESIDENTIAL PROXY IF BLOCKED OR FAILED.
-        return proxy_fetch()
+    # Direct server-side fetch. On datacenter hosts (Render) YouTube may block
+    # this and it will raise — that's expected now that the browser is the
+    # primary caption source; the endpoint maps the failure to a clear message.
+    print(f"Attempting direct fetch for {video_id} in {from_lang}...")
+    direct_api = _install_fast_fetcher(YouTubeTranscriptApi())
+    return attempt_fetch(direct_api)
 
 _SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*\s*$')
 # Paragraph sizing: translation quality benefits from context, but the unit
@@ -516,6 +451,14 @@ _SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*\s*$')
 _PARAGRAPH_TIME_GAP = 2.0
 _MAX_PARAGRAPH_FRAGMENTS = 6
 _MAX_PARAGRAPH_CHARS = 350
+
+# Wall-clock cap for the synchronous per-line translation-repair loop in
+# _process_transcript_snippets. Bounds how long the direct per-line fallback can
+# keep issuing sequential translate calls so a large (esp. client-supplied)
+# transcript that needs manual translation can't pin a Flask worker. Sized to
+# match translate_with_alignment's own budget so the manual-translation path
+# stays comfortably under the frontend's TRANSCRIPT_REQUEST_TIMEOUT_MS (90s).
+_MANUAL_REPAIR_DEADLINE_SECONDS = 45.0
 
 
 def _ends_sentence(text):
@@ -642,39 +585,57 @@ def _processed_snippets_cache_key(video_id, from_lang):
     return "transcript:v1:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-@lru_cache(maxsize=100)
-def get_cached_processed_snippets(video_id, from_lang):
-    """
-    Fetch and clean the transcript, group fragments into paragraphs, and —
-    when the transcript is from a different language than requested — also
-    return paragraph-level translations into the source language.
+def _read_processed_snippets_l2(video_id, from_lang):
+    """L2 (cross-worker Redis) read for the processed-transcript cache. Returns
+    (assigned, paragraphs) on a hit, or None on a miss / no Redis / error. A hit
+    skips the YouTube fetch + grouping + any translation entirely."""
+    if not redis_client:
+        return None
+    try:
+        cached = redis_client.get(_processed_snippets_cache_key(video_id, from_lang))
+        if cached:
+            assigned_c, paragraphs_c = json.loads(cached)
+            return assigned_c, paragraphs_c
+    except Exception as e:
+        print(f"Redis transcript get error: {e}. Proceeding without L2 cache.")
+    return None
 
-    Returns (snippets, paragraphs) where each snippet is
-    {source, start, duration, paragraph} and paragraphs is a list of strings
-    aligned to the paragraph indices on the snippets.
 
-    Two cache layers sit in front of the (expensive) fetch: the per-process
-    lru_cache (L1, this decorator) and a cross-worker Redis layer (L2, below)
-    that survives worker restarts and is shared across gunicorn workers. The L2
-    write is SCOPED to is_correct_lang=True only — i.e. videos that already carry
-    from_lang subtitles, where the output is a deterministic function of the
-    immutable YouTube subtitles + deterministic grouping and NO translation
-    cascade runs. The manual-translation path is provider-state-dependent and
-    deadline-truncatable, so it is intentionally never written to L2.
-    """
-    # L2 read: a hit skips the YouTube fetch + grouping entirely.
-    _redis_key = _processed_snippets_cache_key(video_id, from_lang)
-    if redis_client:
+def _write_processed_snippets_l2(video_id, from_lang, is_correct_lang, assigned, paragraphs):
+    """L2 write, ONLY for the already-in-language path (is_correct_lang=True), so
+    the cached value is a deterministic function of the immutable YouTube
+    subtitles + deterministic grouping with NO translation cascade. The
+    manual-translation path is provider-state-dependent and deadline-truncatable,
+    so it is intentionally never written to L2 (kept out so a partial/degraded
+    translation can't be pinned across workers for the whole TTL)."""
+    if redis_client and is_correct_lang and assigned:
         try:
-            cached = redis_client.get(_redis_key)
-            if cached:
-                assigned_c, paragraphs_c = json.loads(cached)
-                return assigned_c, paragraphs_c
+            redis_client.setex(
+                _processed_snippets_cache_key(video_id, from_lang),
+                REDIS_TTL_SECONDS,
+                json.dumps((assigned, paragraphs), ensure_ascii=False),
+            )
         except Exception as e:
-            print(f"Redis transcript get error: {e}. Proceeding without L2 cache.")
+            print(f"Redis transcript setex error: {e}. Continuing without L2 cache.")
 
-    source_transcript, is_correct_lang = get_cached_transcript(video_id, from_lang)
 
+def _process_transcript_snippets(source_transcript, is_correct_lang, video_id, from_lang):
+    """Clean + group raw transcript snippets into paragraphs and, when the
+    transcript is NOT already in the requested language, translate both the
+    paragraphs and each displayed line into `from_lang`.
+
+    This is the shared, fetch-agnostic core: `source_transcript` may come from
+    the server-side YouTube fetch (get_cached_transcript) OR from the user's
+    browser (the client-side caption path), which matters because YouTube
+    IP-blocks datacenter hosts like Render — a residential browser fetch is the
+    reliable, zero-cost source. Either way the snippets have the SAME shape
+    (dict {text,start,duration} or an object with those attributes) and go
+    through identical grouping/translation, so the two sources are
+    interchangeable and produce byte-identical output.
+
+    Returns (assigned, paragraphs). Raises TranscriptTranslationError when a
+    needed translation no-op'd, so callers don't cache original-language text.
+    """
     cleaned_fragments = []
 
     for snippet in source_transcript:
@@ -742,12 +703,24 @@ def get_cached_processed_snippets(video_id, from_lang):
         # translate that individual line directly rather than showing the user
         # untranslated (original-language) text — which is exactly the "shows
         # the English transcript" bug when a Spanish video has only English subs.
+        #
+        # The direct per-line repair issues ONE synchronous network translate per
+        # empty line, so a pathological input with thousands of empty lines (e.g.
+        # a large client_snippets batch while the translators are in cooldown and
+        # return nothing) could issue thousands of sequential calls and pin the
+        # worker. Bound the repair with a wall-clock deadline: once it's hit we
+        # stop issuing new translate calls and leave remaining lines as-is. Any
+        # resulting mostly-untranslated result is then caught by the
+        # _looks_like_same_text guard below and raised as retryable (not cached),
+        # so we degrade to a clean "try again" instead of hanging.
+        import time
+        repair_deadline = time.monotonic() + _MANUAL_REPAIR_DEADLINE_SECONDS
         repaired_line_texts = []
         for p_idx, members in enumerate(snippet_idx_by_paragraph):
             line_chunks = translated_lines[p_idx] if p_idx < len(translated_lines) else []
             for slot, snippet_i in enumerate(members):
                 chunk = line_chunks[slot] if slot < len(line_chunks) else ""
-                if not (chunk or "").strip():
+                if not (chunk or "").strip() and time.monotonic() < repair_deadline:
                     # Direct per-line fallback so no original-language line leaks.
                     original = assigned[snippet_i]["source"]
                     chunk = (_translate_text(original, from_lang, "auto") or "").strip()
@@ -777,19 +750,75 @@ def get_cached_processed_snippets(video_id, from_lang):
                 f"(provider unavailable). Not caching; retry may succeed."
             )
 
-    # L2 write, ONLY for the already-in-language path (no translation ran, so
-    # the result is deterministic and safe to share across workers/restarts).
-    if redis_client and is_correct_lang and assigned:
-        try:
-            redis_client.setex(
-                _redis_key,
-                REDIS_TTL_SECONDS,
-                json.dumps((assigned, paragraphs), ensure_ascii=False),
-            )
-        except Exception as e:
-            print(f"Redis transcript setex error: {e}. Continuing without L2 cache.")
-
     return assigned, paragraphs
+
+
+@lru_cache(maxsize=100)
+def get_cached_processed_snippets(video_id, from_lang):
+    """
+    Fetch (server-side) and process the transcript for `from_lang`.
+
+    Returns (snippets, paragraphs) where each snippet is
+    {source, start, duration, paragraph} and paragraphs is a list of strings
+    aligned to the paragraph indices on the snippets.
+
+    Two cache layers sit in front of the (expensive) fetch: the per-process
+    lru_cache (L1, this decorator) and a cross-worker Redis layer (L2) that
+    survives worker restarts and is shared across gunicorn workers. See
+    _write_processed_snippets_l2 for why L2 is scoped to is_correct_lang=True.
+
+    This is the SERVER fetch path (direct connection to YouTube). YouTube
+    IP-blocks datacenter hosts, so on Render this can fail. The client-side
+    browser path (get_processed_snippets_from_client) is the preferred,
+    zero-cost source; this remains as the fallback when the browser can't fetch.
+    """
+    cached = _read_processed_snippets_l2(video_id, from_lang)
+    if cached is not None:
+        return cached
+
+    source_transcript, is_correct_lang = get_cached_transcript(video_id, from_lang)
+    assigned, paragraphs = _process_transcript_snippets(
+        source_transcript, is_correct_lang, video_id, from_lang
+    )
+    _write_processed_snippets_l2(video_id, from_lang, is_correct_lang, assigned, paragraphs)
+    return assigned, paragraphs
+
+
+def get_processed_snippets_from_client(video_id, from_lang, client_snippets, client_is_correct_lang):
+    """
+    Process transcript snippets that the USER'S BROWSER already fetched from
+    YouTube, running the exact same grouping + translation pipeline as the
+    server path. This is the PRIMARY caption source (it replaced a paid rotating
+    proxy — see docs/webshare-proxy-removed.md): the browser fetches from a
+    residential IP that YouTube doesn't block, so the server never has to touch
+    YouTube.
+
+    `client_snippets` is a list of {text, start, duration} dicts (already
+    validated by the caller). `client_is_correct_lang` mirrors the server
+    path's is_correct_lang: True when the browser already obtained subtitles in
+    `from_lang` (native, regional, or YouTube auto-translated), False when it
+    could only get another language and we must translate here.
+
+    Caching: L2 READ only. A browser fetch for a video the SERVER already
+    processed is a free hit. But this path deliberately NEVER WRITES the L2
+    cache, because the endpoint is unauthenticated and both the content
+    (client_snippets) and the client_is_correct_lang flag are attacker-
+    controllable — writing them to the shared (video_id, from_lang) key that the
+    trusted server path also reads would let one caller poison the transcript
+    (or its language) served to every other user. Only the server fetch, whose
+    content comes from YouTube directly, is allowed to populate L2. The cost of
+    not caching here is just re-running the cheap grouping on a later client
+    request; the expensive part (the YouTube fetch) was already done in the
+    browser, and the translation path is never L2-cached on either side anyway.
+    """
+    cached = _read_processed_snippets_l2(video_id, from_lang)
+    if cached is not None:
+        return cached
+
+    return _process_transcript_snippets(
+        client_snippets, client_is_correct_lang, video_id, from_lang
+    )
+
 
 def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
     """Generate a cache key for paragraph + per-line translation results."""
@@ -1633,6 +1662,63 @@ def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source
     return translated_paragraphs, translated_lines
 
 
+# Bounds for browser-supplied caption snippets. YouTube transcripts are far
+# smaller than these, so the caps only reject abuse (a crafted request trying to
+# pin a worker on grouping/translation), never a real transcript. Positive
+# validation (allow-list of fields + type/length checks) per input-validation
+# guidance: we build a fresh, minimally-typed list rather than trusting the
+# client's objects.
+# Even a multi-hour video rarely exceeds a few thousand caption lines, so 5000 is
+# generous headroom for a real transcript while capping the worst-case cost of
+# the manual-translation repair loop (bounded further by
+# _MANUAL_REPAIR_DEADLINE_SECONDS) on a crafted request.
+_MAX_CLIENT_SNIPPETS = 5000
+_MAX_CLIENT_SNIPPET_CHARS = 2000    # a single caption line is a few dozen chars
+
+
+def _validate_client_snippets(raw):
+    """Validate + normalize browser-fetched caption snippets into the internal
+    {text, start, duration} shape. Returns a cleaned list, or None if the input
+    isn't a usable snippet array (caller falls back to the server fetch).
+
+    Rejects (returns None) on: wrong container type, too many snippets, or any
+    element that isn't an object with a string `text`. `start`/`duration`
+    default to 0 and are coerced to non-negative floats; non-numeric values are
+    treated as 0 rather than failing the whole batch, since a single odd timing
+    value shouldn't discard an otherwise-good transcript."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    if len(raw) > _MAX_CLIENT_SNIPPETS:
+        print(f"Rejecting client snippets: {len(raw)} exceeds cap {_MAX_CLIENT_SNIPPETS}")
+        return None
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        # Guard against NaN/inf and negatives sneaking into timing math.
+        if f != f or f in (float("inf"), float("-inf")) or f < 0:
+            return 0.0
+        return f
+
+    cleaned = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        text = item.get("text")
+        if not isinstance(text, str):
+            return None
+        if len(text) > _MAX_CLIENT_SNIPPET_CHARS:
+            text = text[:_MAX_CLIENT_SNIPPET_CHARS]
+        cleaned.append({
+            "text": text,
+            "start": _num(item.get("start", 0)),
+            "duration": _num(item.get("duration", 0)),
+        })
+    return cleaned
+
+
 @app.route('/api/transcript', methods=['POST'])
 def get_transcript():
     data = request.get_json(silent=True)
@@ -1651,8 +1737,24 @@ def get_transcript():
     if not video_id:
         return jsonify({"error": "Could not parse a YouTube video ID from the provided URL"}), 400
 
+    # Preferred path: the browser fetched the captions itself (from a residential
+    # IP YouTube doesn't block) and posted them here. We only trust it after
+    # positive validation, and we ALWAYS fall back to the direct server fetch if
+    # the client didn't/couldn't supply usable snippets — so an old client, a
+    # video the browser couldn't reach, or a malformed payload still degrades
+    # gracefully (see docs/webshare-proxy-removed.md for the removed proxy path).
+    client_snippets = _validate_client_snippets(data.get('client_snippets'))
+    client_is_correct_lang = bool(data.get('client_is_correct_lang'))
+
     try:
-        snippets, paragraphs = get_cached_processed_snippets(video_id, from_lang)
+        if client_snippets:
+            print(f"Using client-fetched snippets for {video_id} ({len(client_snippets)} lines, "
+                  f"correct_lang={client_is_correct_lang})")
+            snippets, paragraphs = get_processed_snippets_from_client(
+                video_id, from_lang, client_snippets, client_is_correct_lang
+            )
+        else:
+            snippets, paragraphs = get_cached_processed_snippets(video_id, from_lang)
     except TranscriptTranslationError as e:
         # The transcript needed manual translation into from_lang but the
         # translator no-op'd (outage / cooldown). Not cached, so a retry can
@@ -1663,17 +1765,15 @@ def get_transcript():
                      "Please try again in a moment.",
         }), 503
     except Exception as e:
-        # Map to an actionable message + status. YouTube blocks datacenter IPs,
-        # so on hosts like Render a "blocked" error almost always means the
-        # proxy is missing/misconfigured rather than the video being unavailable.
+        # Map to an actionable message + status. Captions are normally fetched
+        # in the browser; this server-side fallback can be blocked by YouTube on
+        # datacenter hosts (Render), so a "blocked" error here usually means the
+        # browser fetch didn't run and the server IP is blocked, not that the
+        # video is unavailable.
         msg = str(e)
         low = msg.lower()
         print(f"Error fetching transcript for {video_id}: {type(e).__name__}: {msg}")
 
-        if "proxy credentials are not configured" in low:
-            return jsonify({
-                "error": "Transcript fetching is temporarily unavailable (server proxy not configured).",
-            }), 503
         # Parenthesized so precedence is explicit (and binds tighter than or).
         if "blocked" in low or ("ip" in low and "block" in low):
             return jsonify({

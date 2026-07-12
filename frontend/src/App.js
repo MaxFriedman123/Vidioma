@@ -12,8 +12,31 @@ import ClassDashboard from './components/ClassDashboard';
 import ClassView from './components/ClassView';
 import CreateAssignment from './components/CreateAssignment';
 import AssignmentDetail from './components/AssignmentDetail';
+import { fetchClientCaptions } from './youtubeCaptions';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+
+// Try to fetch this video's captions in the browser and, on success, attach
+// them to the /api/transcript request body. YouTube IP-blocks the backend's
+// datacenter host (Render) but not the user's residential browser, so fetching
+// client-side is the primary, $0 caption source (it replaced a paid rotating
+// proxy). On ANY failure this returns the body unchanged and the backend falls
+// back to its own direct fetch, so the load never regresses.
+const attachClientCaptions = async (videoId, fromLang, body) => {
+  try {
+    const captions = await fetchClientCaptions(videoId, fromLang);
+    if (captions && Array.isArray(captions.snippets) && captions.snippets.length) {
+      return {
+        ...body,
+        client_snippets: captions.snippets,
+        client_is_correct_lang: captions.isCorrectLang,
+      };
+    }
+  } catch (_) {
+    // fall through to the unmodified body (server-side fetch fallback)
+  }
+  return body;
+};
 
 // Hard client-side timeout for the transcript request. Fetching + (when the
 // video lacks native subtitles in the chosen language) fully translating the
@@ -535,11 +558,16 @@ function App() {
     // high-water mark for the dashboard, but we no longer resume from it.)
     setCurrentLineIndex(0);
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
+      const requestBody = await attachClientCaptions(extractedId, fromLang, {
         url: requestUrl,
         from_lang: fromLang,
-        to_lang: toLang
-       }, {
+        to_lang: toLang,
+      });
+      // The client caption fetch is async; bail if the user moved on meanwhile.
+      if (activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+      const response = await axios.post(`${API_BASE_URL}/api/transcript`, requestBody, {
         signal: controller.signal,
         timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS,
       });
@@ -588,11 +616,15 @@ function App() {
     transcriptRequestControllerRef.current = controller;
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
+      const requestBody = await attachClientCaptions(youtubeId, transcriptLanguage, {
         url: requestUrl,
         from_lang: transcriptLanguage,
         to_lang: translationLanguage,
-      }, {
+      });
+      if (activePlayerSessionRef.current !== sessionId) {
+        return;
+      }
+      const response = await axios.post(`${API_BASE_URL}/api/transcript`, requestBody, {
         signal: controller.signal,
         timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS,
       });
@@ -662,9 +694,12 @@ function App() {
     transcriptRequestControllerRef.current = controller;
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/api/transcript`, {
+      const requestBody = await attachClientCaptions(youtubeId, tLang, {
         url: requestUrl, from_lang: tLang, to_lang: trLang,
-      }, { signal: controller.signal, timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS });
+      });
+      if (activePlayerSessionRef.current !== sessionId) return;
+      const response = await axios.post(`${API_BASE_URL}/api/transcript`, requestBody,
+        { signal: controller.signal, timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS });
       if (activePlayerSessionRef.current !== sessionId) return;
 
       const snippets = response.data.snippets;

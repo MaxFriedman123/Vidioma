@@ -5,6 +5,7 @@ Vidioma is an interactive language practice app for YouTube videos. You paste a 
 ## Features
 
 - Pulls transcript snippets for a YouTube video
+- Fetches captions in the user's browser by default (no server-side proxy needed)
 - Uses language-aware transcript selection (exact, regional, auto-translate fallback)
 - Lazily translates subtitle chunks during playback
 - Uses fuzzy answer checking in the frontend for active recall practice
@@ -63,11 +64,6 @@ Create `backend/.env` manually (there is no `.env.example` currently):
 REDIS_URL=redis://localhost:6379/0
 REDIS_TTL_SECONDS=86400
 
-# Optional until direct transcript fetch is blocked;
-# required for proxy fallback behavior
-WEBSHARE_USERNAME=your_webshare_username
-WEBSHARE_PASSWORD=your_webshare_password
-
 # Optional: DeepL is used as the primary translator when a key is present.
 # A key ending in ':fx' uses the free tier endpoint.
 DEEPL_API_KEY=your_deepl_key
@@ -123,6 +119,35 @@ npm start
 
 Frontend default URL: `http://localhost:3000`
 
+## Caption Fetching
+
+YouTube blocks caption requests coming from datacenter/cloud IPs (Render, AWS,
+GCP, ...), which is why a paid rotating-proxy (Webshare) was once required in
+production. It does not block ordinary residential IPs — and the app already
+runs a React frontend in the user's residential browser. So captions are fetched
+**client-side**, and the proxy was removed (see
+`docs/webshare-proxy-removed.md` if it ever needs to come back):
+
+1. The browser POSTs YouTube's innertube `/youtubei/v1/player` endpoint with the
+   ANDROID client context (using `Content-Type: text/plain` so it stays a CORS
+   simple request with no preflight). This returns the caption track list with
+   ungated `baseUrl`s. The WEB client is deliberately not used — its caption
+   URLs are PO-token-gated and return an empty body.
+2. The browser picks a track mirroring the backend's selection logic (exact →
+   regional → YouTube auto-translate → source-language fallback) and GETs the
+   track's `timedtext` URL as `fmt=json3` (optionally `&tlang=` for YouTube's
+   own auto-translation).
+3. It posts the resulting snippets to `POST /api/transcript` as
+   `client_snippets`; the backend runs its existing cleaning + paragraph
+   grouping + (when needed) DeepL translation pipeline on them, unchanged.
+
+This is a zero-cost replacement for the proxy. It is also fault-tolerant:
+`frontend/src/youtubeCaptions.js` returns `null` on any failure, and the backend
+falls back to a direct (proxy-free) server-side fetch when a request arrives
+without valid `client_snippets`. So an old client or a malformed payload still
+degrades gracefully — though on a datacenter host that direct fallback can be
+IP-blocked by YouTube, which is exactly the case the browser path now covers.
+
 ## API
 
 ### `POST /api/transcript`
@@ -132,7 +157,29 @@ groups them into paragraphs (used as the translation unit for cross-line
 context). Accepts standard `watch?v=`, `youtu.be/`, `/embed/`, `/shorts/`, and
 `/v/` URLs, plus bare 11-character video IDs.
 
-Request:
+Captions may be supplied by the client (preferred; see "Caption Fetching"). When
+`client_snippets` is present and valid, the server processes those instead of
+fetching from YouTube itself. Both fields are optional; omitting them makes the
+server fetch the transcript directly.
+
+Request (client-supplied captions):
+
+```json
+{
+  "url": "https://www.youtube.com/watch?v=YICiHiU2GBU",
+  "from_lang": "es",
+  "client_snippets": [
+    { "text": "Hola a todos", "start": 12.34, "duration": 1.8 }
+  ],
+  "client_is_correct_lang": true
+}
+```
+
+`client_is_correct_lang` tells the server whether the client-supplied snippets
+are already in `from_lang` (`true`: native/regional/YouTube-auto-translated) or
+in another language that the server must translate (`false`).
+
+Request (server-side fetch, no client captions):
 
 ```json
 {
@@ -196,8 +243,8 @@ list of strings, or `from_lang`/`to_lang` are not strings.
 
 ## Caching Behavior
 
-- In-memory LRU cache is used for transcript fetch and processed transcript snippets.
-- Redis cache (if available) is used for `/api/translate` responses.
+- In-memory LRU cache is used for the server-side transcript fetch and processed transcript snippets.
+- Redis cache (if available) is used for processed transcript snippets (already-in-language only) and `/api/translate` responses. The processed-snippet cache is shared by the client-caption and server-fetch paths, keyed on `(video_id, from_lang)`, so a browser fetch for an already-processed video is a free hit.
 - If Redis is unavailable, the backend continues without Redis caching.
 
 ## Smoke Test Script
@@ -216,9 +263,13 @@ python manual_api_smoke_test.py
 
 ## Current Limitations
 
-- No automated test suite yet (only manual smoke testing)
 - Error responses are basic and can be improved
-- Input validation can be hardened further for malformed JSON payloads
+- Client-side caption fetching depends on YouTube's innertube/timedtext contract; if YouTube changes it, the server-side fetch fallback still applies
+
+## Tests
+
+- Backend: `cd backend && python -m pytest -q`
+- Frontend: `cd frontend && CI=true npx react-scripts test --watchAll=false`
 
 ## License
 

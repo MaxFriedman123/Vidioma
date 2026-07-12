@@ -1,2 +1,6 @@
 .env
-__pycache__/dump.rdb
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+dump.rdb

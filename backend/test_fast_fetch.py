@@ -83,32 +83,5 @@ class TestFastFetcherFallback(unittest.TestCase):
         self.assertEqual(stock_calls["n"], 0, "block must propagate, not fall back")
 
 
-class TestForceProxyGating(unittest.TestCase):
-    """FORCE_PROXY/RENDER skips the always-failing direct attempt in prod; unset
-    keeps today's direct-first behavior."""
-
-    def test_force_proxy_skips_direct_and_requires_creds(self):
-        import os
-
-        app.get_cached_transcript.cache_clear()
-        had = os.environ.get("FORCE_PROXY")
-        os.environ["FORCE_PROXY"] = "1"
-        # Ensure no proxy creds so the proxy path raises immediately (proving we
-        # went straight to it without attempting/awaiting a direct fetch).
-        saved = {k: os.environ.pop(k, None) for k in ("WEBSHARE_USERNAME", "WEBSHARE_PASSWORD")}
-        try:
-            with self.assertRaises(ValueError):
-                app.get_cached_transcript("dQw4w9WgXcQ", "en")
-        finally:
-            if had is None:
-                os.environ.pop("FORCE_PROXY", None)
-            else:
-                os.environ["FORCE_PROXY"] = had
-            for k, v in saved.items():
-                if v is not None:
-                    os.environ[k] = v
-            app.get_cached_transcript.cache_clear()
-
-
 if __name__ == "__main__":
     unittest.main()

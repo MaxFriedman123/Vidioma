@@ -28,6 +28,12 @@ jest.mock('react-youtube', () => {
     return <div data-testid="youtube-player">YouTube Player</div>;
   };
 });
+// The client-side YouTube caption fetch hits the network; mock it to null so
+// tests deterministically exercise the server-fetch fallback (the /api/transcript
+// axios mock), matching behavior when the browser can't reach YouTube.
+jest.mock('./youtubeCaptions', () => ({
+  fetchClientCaptions: jest.fn().mockResolvedValue(null),
+}));
 
 const axios = require('axios');
 
