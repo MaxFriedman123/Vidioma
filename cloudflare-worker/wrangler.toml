@@ -1,0 +1,6 @@
+name = "vidioma-caption-relay"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# Free tier: 100,000 requests/day. No paid features used.
+workers_dev = true

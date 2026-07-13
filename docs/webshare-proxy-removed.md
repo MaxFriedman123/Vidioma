@@ -17,6 +17,14 @@ residential IP), which is a $0 replacement that covers the same scenarios. See
 server still does a **direct** (proxy-free) fetch as a fallback; only the paid
 proxy hop was deleted.
 
+**You probably don't need to re-add Webshare.** The caption LIST call can be put
+on a YouTube-clean egress IP for **$0** via Cloudflare WARP (backend
+`CAPTION_PROXY_URL` + `backend/warp/start-warp.sh`) or a free Cloudflare Worker
+relay (`cloudflare-worker/`), both tested 22/22 against the real block. See
+`docs/caption-egress.md` for the full tested comparison and setup. The steps
+below remain only for the case where you specifically want the paid
+rotating-residential proxy back.
+
 No secret scrubbing was needed: `backend/.env` is git-ignored and was never
 committed, and the live credentials lived only in the host's environment
 (Render). The Webshare subscription was CANCELED on 2026-07-12, which

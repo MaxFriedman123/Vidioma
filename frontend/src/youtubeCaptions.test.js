@@ -267,3 +267,125 @@ describe('fetchClientCaptions hybrid (backend list) path', () => {
     expect(await fetchClientCaptions('vid', 'es')).toBeNull();
   });
 });
+
+describe('fetchClientCaptions Cloudflare Worker relay path', () => {
+  const API = 'https://api.example.test';
+  const RELAY = 'https://relay.example.workers.dev';
+
+  test('relay is tried before backend when direct is CORS-blocked', async () => {
+    const seen = [];
+    global.fetch = jest.fn(async (url, options) => {
+      if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+        throw new TypeError('Failed to fetch'); // CORS block
+      }
+      if (url === RELAY) {
+        seen.push('relay');
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            video_id: 'vid',
+            url: 'https://www.youtube.com/api/timedtext?v=vid&lang=es&fmt=srv3',
+            is_correct_lang: true, tlang: null, language_code: 'es',
+          }),
+        };
+      }
+      if (typeof url === 'string' && url.includes('/api/caption-tracks')) {
+        seen.push('backend'); // must NOT be reached: relay already succeeded
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return {
+        ok: true, status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => JSON.parse(json3Body()),
+        text: async () => json3Body(),
+      };
+    });
+
+    const result = await fetchClientCaptions('vid', 'es', API, RELAY);
+    expect(result).not.toBeNull();
+    expect(result.isCorrectLang).toBe(true);
+    expect(seen).toEqual(['relay']); // backend not consulted
+  });
+
+  test('backend is used when the relay fails', async () => {
+    const seen = [];
+    global.fetch = jest.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+        throw new TypeError('Failed to fetch');
+      }
+      if (url === RELAY) {
+        seen.push('relay');
+        return { ok: false, status: 503, json: async () => ({ error: 'blocked' }) };
+      }
+      if (typeof url === 'string' && url.includes('/api/caption-tracks')) {
+        seen.push('backend');
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            video_id: 'vid',
+            url: 'https://www.youtube.com/api/timedtext?v=vid&lang=es&fmt=srv3',
+            is_correct_lang: true, tlang: null, language_code: 'es',
+          }),
+        };
+      }
+      return {
+        ok: true, status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => JSON.parse(json3Body()),
+        text: async () => json3Body(),
+      };
+    });
+
+    const result = await fetchClientCaptions('vid', 'es', API, RELAY);
+    expect(result).not.toBeNull();
+    // Relay is retried on 503 (transient egress rate-limit), then we fall back to
+    // the backend, which succeeds. Assert the relay was retried >1x and the
+    // backend was consulted exactly once, last.
+    const relayCount = seen.filter((s) => s === 'relay').length;
+    expect(relayCount).toBeGreaterThan(1);
+    expect(seen.filter((s) => s === 'backend')).toEqual(['backend']);
+    expect(seen[seen.length - 1]).toBe('backend');
+  }, 15000);
+
+  test('relay 503 then success on a later retry -> no backend fallback', async () => {
+    const seen = [];
+    let relayHits = 0;
+    global.fetch = jest.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+        throw new TypeError('Failed to fetch');
+      }
+      if (url === RELAY) {
+        relayHits += 1;
+        seen.push('relay');
+        // First two calls 503 (throttled egress), third succeeds (fresh PoP).
+        if (relayHits < 3) {
+          return { ok: false, status: 503, json: async () => ({ error: 'blocked' }) };
+        }
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            video_id: 'vid',
+            url: 'https://www.youtube.com/api/timedtext?v=vid&lang=es&fmt=srv3',
+            is_correct_lang: true, tlang: null, language_code: 'es',
+          }),
+        };
+      }
+      if (typeof url === 'string' && url.includes('/api/caption-tracks')) {
+        seen.push('backend');
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return {
+        ok: true, status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => JSON.parse(json3Body()),
+        text: async () => json3Body(),
+      };
+    });
+
+    const result = await fetchClientCaptions('vid', 'es', API, RELAY);
+    expect(result).not.toBeNull();
+    expect(result.isCorrectLang).toBe(true);
+    expect(relayHits).toBe(3); // recovered on the 3rd relay attempt
+    expect(seen).not.toContain('backend'); // backend never needed
+  }, 15000);
+});

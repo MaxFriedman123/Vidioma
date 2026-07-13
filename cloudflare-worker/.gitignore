@@ -1,0 +1,6 @@
+# Wrangler local state: build cache + account metadata (contains your CF account
+# id). Never commit — regenerated locally on `wrangler dev`/`deploy`.
+.wrangler/
+node_modules/
+dist/
+.dev.vars

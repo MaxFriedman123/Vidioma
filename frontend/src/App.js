@@ -15,6 +15,11 @@ import AssignmentDetail from './components/AssignmentDetail';
 import { fetchClientCaptions } from './youtubeCaptions';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+// Optional Cloudflare Worker caption-list relay. When set, the browser lists
+// caption tracks through it (its Cloudflare egress isn't YouTube-IP-blocked)
+// before falling back to the backend's /api/caption-tracks. See
+// docs/caption-egress.md and cloudflare-worker/.
+const CAPTION_RELAY_URL = (process.env.REACT_APP_CAPTION_RELAY_URL || '').replace(/\/$/, '');
 
 // Try to fetch this video's captions in the browser and, on success, attach
 // them to the /api/transcript request body. YouTube IP-blocks the backend's
@@ -24,7 +29,7 @@ const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').
 // back to its own direct fetch, so the load never regresses.
 const attachClientCaptions = async (videoId, fromLang, body) => {
   try {
-    const captions = await fetchClientCaptions(videoId, fromLang, API_BASE_URL);
+    const captions = await fetchClientCaptions(videoId, fromLang, API_BASE_URL, CAPTION_RELAY_URL);
     if (captions && Array.isArray(captions.snippets) && captions.snippets.length) {
       return {
         ...body,

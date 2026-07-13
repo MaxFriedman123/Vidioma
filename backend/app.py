@@ -5,6 +5,10 @@ load_dotenv()  # Load environment variables from .env file
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from youtube_transcript_api import YouTubeTranscriptApi
+try:
+    from youtube_transcript_api.proxies import GenericProxyConfig
+except Exception:  # pragma: no cover - older library versions
+    GenericProxyConfig = None
 import re
 import json
 import hashlib
@@ -178,6 +182,38 @@ def _install_fast_fetcher(api):
     except Exception as exc:
         print(f"Warning: could not install fast fetcher ({exc}); using stock path.")
     return api
+
+
+# ── Clean-egress proxy for the caption LIST call ──────────────────────────
+# YouTube IP-blocks datacenter/cloud egress (Render/AWS/GCP), so the innertube
+# LIST call fails from the server (measured: 0/22 hard videos from Render). The
+# fix is to route just that call through an egress IP YouTube treats as clean.
+# CAPTION_PROXY_URL lets ops point it at one WITHOUT any code change or redeploy:
+#
+#   Cloudflare WARP (free, verified 22/22): run wgcf+wireproxy as a userspace
+#     SOCKS5 sidecar and set CAPTION_PROXY_URL=socks5h://127.0.0.1:25344 .
+#     WARP egresses from Cloudflare's AS13335 ranges, which YouTube does not
+#     block. Needs `requests[socks]` (see requirements.txt).
+#   Any http(s)/socks proxy works too (e.g. a residential proxy) — same knob.
+#
+# Empty/unset -> direct connection (the pre-existing behavior; correct for
+# residential hosts and local dev, which aren't blocked). The browser hybrid
+# path (/api/caption-tracks + client download) still works regardless; this only
+# improves the server-side LIST success rate on blocked hosts.
+CAPTION_PROXY_URL = os.environ.get("CAPTION_PROXY_URL", "").strip()
+
+
+def _new_transcript_api():
+    """Build a YouTubeTranscriptApi, routing through CAPTION_PROXY_URL when set.
+    Mirrors how the removed Webshare integration injected its proxy_config, so
+    the block-retry loop and everything downstream are unchanged."""
+    if CAPTION_PROXY_URL and GenericProxyConfig is not None:
+        try:
+            return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(
+                http_url=CAPTION_PROXY_URL, https_url=CAPTION_PROXY_URL))
+        except Exception as exc:
+            print(f"Warning: CAPTION_PROXY_URL set but proxy config failed ({exc}); using direct.")
+    return YouTubeTranscriptApi()
 
 
 app = Flask(__name__)
@@ -442,7 +478,7 @@ def get_cached_transcript(video_id, from_lang):
     # this and it will raise — that's expected now that the browser is the
     # primary caption source; the endpoint maps the failure to a clear message.
     print(f"Attempting direct fetch for {video_id} in {from_lang}...")
-    direct_api = _install_fast_fetcher(YouTubeTranscriptApi())
+    direct_api = _install_fast_fetcher(_new_transcript_api())
     return attempt_fetch(direct_api)
 
 
@@ -478,7 +514,7 @@ def select_caption_track_url(video_id, from_lang):
     listing failure (blocked/unavailable/no tracks) so the caller maps it to a
     clear status, same as the fetch path.
     """
-    api = _install_fast_fetcher(YouTubeTranscriptApi())
+    api = _install_fast_fetcher(_new_transcript_api())
     available = api.list(video_id)
     if not available:
         raise ValueError("No transcripts are available for this video")

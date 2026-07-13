@@ -58,6 +58,19 @@ const ANDROID_CONTEXT = {
 const INNERTUBE_TIMEOUT_MS = 12000;
 const TIMEDTEXT_TIMEOUT_MS = 15000;
 
+// The Cloudflare Worker relay lists via Cloudflare's egress, which YouTube
+// rate-limits per-IP-per-moment: a single call succeeds only ~65-80% of the
+// time, but the FAILURES ARE TRANSIENT and IP-specific. Each fresh top-level
+// request can route through a different Cloudflare PoP/egress, so retrying at
+// this level (with spacing to let the per-IP limit clear) reaches ~100%
+// (measured 22/22, avg <2 tries). Spacing matters: back-to-back retries hit the
+// same throttled edge. Only 503/blocked responses are retried; hard errors
+// (400/404) short-circuit.
+const RELAY_LIST_MAX_TRIES = 6;
+const RELAY_LIST_RETRY_DELAY_MS = 700;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const baseLang = (code) => (code || '').toLowerCase().split('-')[0];
 
 // Fetch with an abort-based timeout. Returns the Response, or throws on
@@ -207,31 +220,51 @@ async function fetchTimedText(baseUrl, tlang) {
   return snippets;
 }
 
-// HYBRID list: ask our backend for the selected track's signed timedtext URL.
-// The backend does the innertube listing server-side (no CORS) and returns a URL
-// that is CORS-open + not IP-locked, so the browser can fetch it. Returns
-// { baseUrl, tlang, isCorrectLang } or null on any failure.
-async function fetchTrackFromBackend(videoId, fromLang, apiBaseUrl) {
-  if (!apiBaseUrl) return null;
-  try {
-    const resp = await fetchWithTimeout(
-      `${apiBaseUrl}/api/caption-tracks`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: videoId, from_lang: fromLang }),
-      },
-      INNERTUBE_TIMEOUT_MS,
-    );
-    if (!resp.ok) return null; // backend couldn't list (blocked/unavailable)
-    const data = await resp.json();
-    if (!data || !data.url) return null;
-    // The backend already appended &tlang for the auto-translate case, so we
-    // pass tlang=null here to avoid appending it twice.
-    return { baseUrl: data.url, tlang: null, isCorrectLang: !!data.is_correct_lang };
-  } catch (err) {
-    return null;
+// HYBRID list: POST an endpoint that lists the video's caption tracks
+// server-side (no CORS there) and returns the selected track's signed timedtext
+// URL — which IS CORS-open + not IP-locked, so the browser can then fetch it.
+// `endpoint` is either our own backend's /api/caption-tracks OR a Cloudflare
+// Worker relay (identical request/response contract; it egresses from
+// Cloudflare's IPs, so it lists even when our backend host is IP-blocked).
+//
+// `maxTries` retries ONLY transient failures (503/network/timeout), spaced so a
+// per-IP rate-limit on one Cloudflare egress can clear before the next fresh
+// request routes through a different PoP. A hard failure (400/404 = bad id / no
+// captions) returns null immediately without retrying. Returns
+// { baseUrl, tlang, isCorrectLang } or null.
+async function fetchTrackFromEndpoint(endpoint, videoId, fromLang, maxTries = 1) {
+  if (!endpoint) return null;
+  for (let attempt = 0; attempt < maxTries; attempt++) {
+    let transient = false;
+    try {
+      const resp = await fetchWithTimeout(
+        endpoint,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: videoId, from_lang: fromLang }),
+        },
+        INNERTUBE_TIMEOUT_MS,
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.url) {
+          // The endpoint already appended &tlang for the auto-translate case, so
+          // pass tlang=null downstream to avoid appending it twice.
+          return { baseUrl: data.url, tlang: null, isCorrectLang: !!data.is_correct_lang };
+        }
+        return null; // 200 but no url -> nothing usable, don't retry
+      }
+      // 503 (blocked/rate-limited egress) is transient and worth retrying on a
+      // fresh request; other statuses (400/404) are terminal.
+      transient = resp.status === 503;
+    } catch (err) {
+      transient = true; // network error / timeout -> retry
+    }
+    if (!transient) return null;
+    if (attempt < maxTries - 1) await sleep(RELAY_LIST_RETRY_DELAY_MS);
   }
+  return null;
 }
 
 /**
@@ -245,16 +278,20 @@ async function fetchTrackFromBackend(videoId, fromLang, apiBaseUrl) {
  * @param {string} videoId    11-char YouTube video id.
  * @param {string} fromLang   transcript language code the user requested.
  * @param {string} apiBaseUrl our backend base URL (for the hybrid list call).
+ * @param {string} [relayUrl] optional Cloudflare Worker relay URL. When set, the
+ *          browser lists tracks via the relay FIRST (its Cloudflare egress isn't
+ *          YouTube-blocked, so it lists even when our backend host is), falling
+ *          back to the backend's /api/caption-tracks.
  * @returns {Promise<{snippets: Array, isCorrectLang: boolean}|null>}
  *          The snippets ({text,start,duration}) plus whether they are already
  *          in fromLang, or null if neither path could get usable captions
  *          (caller then falls back to the backend's server fetch).
  */
-export async function fetchClientCaptions(videoId, fromLang, apiBaseUrl) {
+export async function fetchClientCaptions(videoId, fromLang, apiBaseUrl, relayUrl) {
   if (!videoId) return null;
 
-  // Resolve the track to download: DIRECT innertube first, then HYBRID via
-  // backend. `choice` is { baseUrl, tlang, isCorrectLang }.
+  // Resolve the track to download: DIRECT innertube first, then HYBRID via a
+  // relay/backend. `choice` is { baseUrl, tlang, isCorrectLang }.
   let choice = null;
   try {
     const playerData = await fetchPlayerData(videoId);
@@ -267,8 +304,16 @@ export async function fetchClientCaptions(videoId, fromLang, apiBaseUrl) {
     // Direct listing failed (typically CORS in production) — try the hybrid.
   }
 
-  if (!choice) {
-    choice = await fetchTrackFromBackend(videoId, fromLang, apiBaseUrl);
+  // Hybrid listing: Cloudflare Worker relay first (clean egress), then our own
+  // backend. Both share the same request/response contract. The relay gets
+  // several spaced retries because its per-call success is only ~65-80% (each
+  // fresh request can land on a different, un-throttled Cloudflare egress); the
+  // backend gets a single try (its egress isn't the bottleneck being retried).
+  if (!choice && relayUrl) {
+    choice = await fetchTrackFromEndpoint(relayUrl, videoId, fromLang, RELAY_LIST_MAX_TRIES);
+  }
+  if (!choice && apiBaseUrl) {
+    choice = await fetchTrackFromEndpoint(`${apiBaseUrl}/api/caption-tracks`, videoId, fromLang, 1);
   }
   if (!choice || !choice.baseUrl) return null;
 

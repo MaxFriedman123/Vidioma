@@ -7,7 +7,7 @@ translators
 # but pinning keeps the fast path valid and behavior reproducible across deploys.
 youtube-transcript-api==1.2.4
 redis
-requests
+requests[socks]
 gunicorn
 python-dotenv
 PyJWT[crypto]

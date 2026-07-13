@@ -378,5 +378,64 @@ class TestCaptionTracksEndpoint(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
 
 
+class TestNewTranscriptApiProxy(unittest.TestCase):
+    """The CAPTION_PROXY_URL egress hook: when set, the transcript API is built
+    with a GenericProxyConfig routing through it (so a WARP/other proxy can
+    un-block the caption LIST on datacenter hosts); when unset, a plain direct
+    API is built (prior behavior)."""
+
+    def setUp(self):
+        self._orig_url = app.CAPTION_PROXY_URL
+        self._orig_gpc = app.GenericProxyConfig
+        self._orig_api = app.YouTubeTranscriptApi
+
+    def tearDown(self):
+        app.CAPTION_PROXY_URL = self._orig_url
+        app.GenericProxyConfig = self._orig_gpc
+        app.YouTubeTranscriptApi = self._orig_api
+
+    def test_unset_builds_direct_api(self):
+        app.CAPTION_PROXY_URL = ""
+        captured = {}
+        app.YouTubeTranscriptApi = lambda *a, **k: captured.setdefault("kwargs", k) or "api"
+        app._new_transcript_api()
+        self.assertNotIn("proxy_config", captured["kwargs"])
+
+    def test_set_builds_proxied_api(self):
+        app.CAPTION_PROXY_URL = "socks5h://127.0.0.1:25344"
+
+        class _FakeGPC:
+            def __init__(self, http_url=None, https_url=None):
+                self.http_url = http_url
+                self.https_url = https_url
+
+        app.GenericProxyConfig = _FakeGPC
+        captured = {}
+        app.YouTubeTranscriptApi = lambda *a, **k: captured.setdefault("kwargs", k) or "api"
+        app._new_transcript_api()
+        pc = captured["kwargs"].get("proxy_config")
+        self.assertIsInstance(pc, _FakeGPC)
+        self.assertEqual(pc.http_url, "socks5h://127.0.0.1:25344")
+        self.assertEqual(pc.https_url, "socks5h://127.0.0.1:25344")
+
+    def test_proxy_build_failure_falls_back_to_direct(self):
+        app.CAPTION_PROXY_URL = "socks5h://127.0.0.1:25344"
+
+        def _boom(http_url=None, https_url=None):
+            raise RuntimeError("bad proxy")
+
+        app.GenericProxyConfig = _boom
+        calls = {"direct": 0}
+
+        def _api(*a, **k):
+            if "proxy_config" not in k:
+                calls["direct"] += 1
+            return "api"
+
+        app.YouTubeTranscriptApi = _api
+        app._new_transcript_api()
+        self.assertEqual(calls["direct"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
