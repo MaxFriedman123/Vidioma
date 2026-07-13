@@ -178,3 +178,92 @@ describe('fetchClientCaptions failure handling', () => {
     expect(await fetchClientCaptions('vid', 'en')).toBeNull();
   });
 });
+
+describe('fetchClientCaptions hybrid (backend list) path', () => {
+  const API = 'https://api.example.test';
+
+  // Simulate production: the direct innertube POST is CORS-blocked (throws),
+  // but our backend /api/caption-tracks returns a signed timedtext URL, and the
+  // browser can then download the CORS-open timedtext.
+  function installHybridFetch({ backendResponse, backendOk = true, onTimedText }) {
+    global.fetch = jest.fn(async (url, options) => {
+      if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+        throw new TypeError('Failed to fetch'); // CORS block
+      }
+      if (typeof url === 'string' && url.includes('/api/caption-tracks')) {
+        return {
+          ok: backendOk,
+          status: backendOk ? 200 : 503,
+          json: async () => backendResponse,
+        };
+      }
+      // timedtext download
+      const body = onTimedText ? onTimedText(url) : json3Body();
+      return {
+        ok: true, status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => JSON.parse(body),
+        text: async () => body,
+      };
+    });
+  }
+
+  test('falls back to backend list when direct innertube is CORS-blocked', async () => {
+    let timedUrl = null;
+    installHybridFetch({
+      backendResponse: {
+        video_id: 'vid',
+        url: 'https://www.youtube.com/api/timedtext?v=vid&lang=es&fmt=srv3',
+        is_correct_lang: true,
+        tlang: null,
+        language_code: 'es',
+      },
+      onTimedText: (url) => { timedUrl = url; return json3Body(); },
+    });
+
+    const result = await fetchClientCaptions('vid', 'es', API);
+    expect(result).not.toBeNull();
+    expect(result.isCorrectLang).toBe(true);
+    expect(result.snippets).toHaveLength(2);
+    // Backend URL used; fmt normalized to json3 in the browser.
+    expect(timedUrl).toContain('lang=es');
+    expect(timedUrl).toContain('&fmt=json3');
+    expect(timedUrl).not.toContain('fmt=srv3');
+  });
+
+  test('backend already appended tlang -> browser does not double-append', async () => {
+    let timedUrl = null;
+    installHybridFetch({
+      backendResponse: {
+        video_id: 'vid',
+        url: 'https://www.youtube.com/api/timedtext?v=vid&lang=es&fmt=srv3&tlang=en',
+        is_correct_lang: true,
+        tlang: 'en',
+        language_code: 'es',
+      },
+      onTimedText: (url) => { timedUrl = url; return json3Body(); },
+    });
+
+    const result = await fetchClientCaptions('vid', 'en', API);
+    expect(result.isCorrectLang).toBe(true);
+    // Exactly one tlang=en (from the backend URL), not two.
+    expect((timedUrl.match(/tlang=/g) || []).length).toBe(1);
+    expect(timedUrl).toContain('tlang=en');
+  });
+
+  test('backend list fails (blocked) -> null so caller uses server fetch', async () => {
+    installHybridFetch({ backendResponse: { error: 'blocked' }, backendOk: false });
+    expect(await fetchClientCaptions('vid', 'es', API)).toBeNull();
+  });
+
+  test('no apiBaseUrl and direct blocked -> null (no hybrid attempt)', async () => {
+    global.fetch = jest.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+        throw new TypeError('Failed to fetch');
+      }
+      throw new Error('should not fetch anything else');
+    });
+    // Called without apiBaseUrl -> hybrid is skipped, returns null.
+    expect(await fetchClientCaptions('vid', 'es')).toBeNull();
+  });
+});

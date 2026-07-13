@@ -247,5 +247,136 @@ class TestManualRepairDeadline(unittest.TestCase):
         self.assertEqual(calls["n"], 0, "no direct translate calls after deadline")
 
 
+class _FakeTranscript:
+    """Stand-in for youtube_transcript_api Transcript with just the attributes
+    select_caption_track_url reads."""
+
+    def __init__(self, language_code, is_generated=False, translate_targets=()):
+        self.language_code = language_code
+        self.is_generated = is_generated
+        self._url = f"https://yt/timedtext?lang={language_code}&fmt=srv3"
+        self._targets = set(translate_targets)
+
+    @property
+    def is_translatable(self):
+        return len(self._targets) > 0
+
+    def translate(self, code):
+        if code not in self._targets:
+            raise Exception("TranslationLanguageNotAvailable")
+        t = _FakeTranscript(self.language_code, self.is_generated)
+        t._url = f"{self._url}&tlang={code}"
+        return t
+
+
+class _FakeApi:
+    def __init__(self, tracks):
+        self._tracks = tracks
+
+    def list(self, video_id):
+        return list(self._tracks)
+
+
+class TestSelectCaptionTrackUrl(unittest.TestCase):
+    """The hybrid path's server-side track listing must mirror the server
+    fetch's selection precedence exactly, so is_correct_lang stays consistent."""
+
+    def setUp(self):
+        self._orig_api = app.YouTubeTranscriptApi
+        self._orig_install = app._install_fast_fetcher
+        # _install_fast_fetcher(api) normally swaps the fetcher; for the fake api
+        # just pass it through unchanged.
+        app._install_fast_fetcher = lambda api: api
+
+    def tearDown(self):
+        app.YouTubeTranscriptApi = self._orig_api
+        app._install_fast_fetcher = self._orig_install
+        app.select_caption_track_url.cache_clear()
+
+    def _set_tracks(self, tracks):
+        app.select_caption_track_url.cache_clear()
+        app.YouTubeTranscriptApi = lambda *a, **k: _FakeApi(tracks)
+
+    def test_exact_match(self):
+        self._set_tracks([_FakeTranscript("en"), _FakeTranscript("es")])
+        r = app.select_caption_track_url("vid", "es")
+        self.assertTrue(r["is_correct_lang"])
+        self.assertIsNone(r["tlang"])
+        self.assertIn("lang=es", r["url"])
+        self.assertNotIn("tlang=", r["url"])
+
+    def test_regional_prefers_manual(self):
+        self._set_tracks([
+            _FakeTranscript("en-US", is_generated=True),
+            _FakeTranscript("en-GB", is_generated=False),
+        ])
+        r = app.select_caption_track_url("vid", "en")
+        self.assertTrue(r["is_correct_lang"])
+        self.assertIn("lang=en-GB", r["url"])  # manual sorts before asr
+
+    def test_auto_translate_target(self):
+        # Only French subs; German requested and offered as a translate target.
+        self._set_tracks([_FakeTranscript("fr", translate_targets={"de", "es"})])
+        r = app.select_caption_track_url("vid", "de")
+        self.assertTrue(r["is_correct_lang"])
+        self.assertEqual(r["tlang"], "de")
+        self.assertIn("tlang=de", r["url"])
+
+    def test_fallback_source_track(self):
+        # Only French, not translatable into German -> source track, not correct.
+        self._set_tracks([_FakeTranscript("fr")])
+        r = app.select_caption_track_url("vid", "de")
+        self.assertFalse(r["is_correct_lang"])
+        self.assertIsNone(r["tlang"])
+        self.assertIn("lang=fr", r["url"])
+
+    def test_no_tracks_raises(self):
+        self._set_tracks([])
+        with self.assertRaises(Exception):
+            app.select_caption_track_url("vid", "en")
+
+
+class TestCaptionTracksEndpoint(unittest.TestCase):
+    """The /api/caption-tracks route: validation + success + error mapping."""
+
+    def setUp(self):
+        self._orig_select = app.select_caption_track_url
+        self.client = app.app.test_client()
+
+    def tearDown(self):
+        app.select_caption_track_url = self._orig_select
+
+    def test_success_returns_url(self):
+        app.select_caption_track_url = lambda vid, lang: {
+            "url": "https://yt/timedtext?lang=es&fmt=srv3",
+            "is_correct_lang": True, "tlang": None, "language_code": "es",
+        }
+        resp = self.client.post("/api/caption-tracks", json={
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "from_lang": "es",
+        })
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["url"], "https://yt/timedtext?lang=es&fmt=srv3")
+        self.assertTrue(body["is_correct_lang"])
+        self.assertEqual(body["video_id"], "dQw4w9WgXcQ")
+
+    def test_missing_url_400(self):
+        resp = self.client.post("/api/caption-tracks", json={"from_lang": "es"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_bad_video_id_400(self):
+        resp = self.client.post("/api/caption-tracks", json={"url": "not a url", "from_lang": "es"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_blocked_maps_to_503(self):
+        def boom(vid, lang):
+            raise Exception("RequestBlocked: IP blocked")
+        app.select_caption_track_url = boom
+        resp = self.client.post("/api/caption-tracks", json={
+            "url": "dQw4w9WgXcQ", "from_lang": "es",
+        })
+        self.assertEqual(resp.status_code, 503)
+
+
 if __name__ == "__main__":
     unittest.main()

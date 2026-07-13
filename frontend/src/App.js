@@ -24,7 +24,7 @@ const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').
 // back to its own direct fetch, so the load never regresses.
 const attachClientCaptions = async (videoId, fromLang, body) => {
   try {
-    const captions = await fetchClientCaptions(videoId, fromLang);
+    const captions = await fetchClientCaptions(videoId, fromLang, API_BASE_URL);
     if (captions && Array.isArray(captions.snippets) && captions.snippets.length) {
       return {
         ...body,

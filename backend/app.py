@@ -445,6 +445,85 @@ def get_cached_transcript(video_id, from_lang):
     direct_api = _install_fast_fetcher(YouTubeTranscriptApi())
     return attempt_fetch(direct_api)
 
+
+@lru_cache(maxsize=200)
+def select_caption_track_url(video_id, from_lang):
+    """
+    LIST caption tracks server-side and return the signed timedtext URL of the
+    track the browser should fetch, WITHOUT downloading the captions here.
+
+    This is the server half of the hybrid caption path. The browser can't do the
+    innertube /player POST itself (YouTube doesn't send CORS headers for it, so a
+    cross-origin call from vidioma.app is blocked), but the timedtext baseUrl the
+    POST returns is CORS-open AND not IP-locked (its sparams carry ip=0.0.0.0).
+    So the server does the lightweight listing (server-to-server, no CORS) and
+    hands the browser a URL it can fetch from the user's residential IP — which
+    is what actually dodges YouTube's datacenter-IP blocking of the caption
+    download. Listing is a much lighter call than the full transcript fetch, so
+    it is far more likely to succeed from a datacenter host than downloading the
+    captions server-side.
+
+    Returns a dict: {url, is_correct_lang, tlang, language_code} where
+    - url: the signed timedtext baseUrl the browser should GET (fmt appended
+      client-side). For the auto-translate case this already has &tlang=... .
+    - is_correct_lang: mirrors get_cached_transcript — True when the chosen track
+      is already in from_lang (native/regional/YouTube-auto-translated), False
+      when it's a source track the backend must translate after the browser
+      posts it back.
+    - tlang: the YouTube auto-translate target applied (or None).
+    - language_code: the source track's language code (for diagnostics).
+
+    Mirrors attempt_fetch()'s selection precedence EXACTLY so is_correct_lang has
+    the same meaning across the direct, server-fetch, and hybrid paths. Raises on
+    listing failure (blocked/unavailable/no tracks) so the caller maps it to a
+    clear status, same as the fetch path.
+    """
+    api = _install_fast_fetcher(YouTubeTranscriptApi())
+    available = api.list(video_id)
+    if not available:
+        raise ValueError("No transcripts are available for this video")
+
+    requested = from_lang.lower()
+
+    def base_lang(code):
+        return code.lower().split("-")[0]
+
+    def sort_key(t):
+        return (getattr(t, "is_generated", False), t.language_code.lower())
+
+    # 1. Exact match.
+    exact = next((t for t in available if t.language_code.lower() == requested), None)
+    if exact:
+        return {"url": exact._url, "is_correct_lang": True, "tlang": None,
+                "language_code": exact.language_code}
+
+    # 2. Regional/base-language match (prefer manual).
+    regional = [t for t in available if base_lang(t.language_code) == requested]
+    if regional:
+        best = sorted(regional, key=sort_key)[0]
+        return {"url": best._url, "is_correct_lang": True, "tlang": None,
+                "language_code": best.language_code}
+
+    # 3. YouTube auto-translate from any translatable track (exact-code target),
+    #    preferring a manual source. translate() only appends &tlang=; it does no
+    #    network call, so listing-only stays cheap.
+    translatable = sorted([t for t in available if getattr(t, "is_translatable", False)],
+                          key=sort_key)
+    for t in translatable:
+        try:
+            translated = t.translate(from_lang)
+            return {"url": translated._url, "is_correct_lang": True,
+                    "tlang": from_lang, "language_code": t.language_code}
+        except Exception:
+            continue
+
+    # 4. Fallback: best source track; backend translates after the browser posts
+    #    the snippets back (is_correct_lang False).
+    fallback = sorted(available, key=sort_key)[0]
+    return {"url": fallback._url, "is_correct_lang": False, "tlang": None,
+            "language_code": fallback.language_code}
+
+
 _SENTENCE_END_RE = re.compile(r'[.!?…]["\')\]]*\s*$')
 # Paragraph sizing: translation quality benefits from context, but the unit
 # should still be short enough that a fuzzy substring match stays meaningful.
@@ -1813,6 +1892,73 @@ def get_transcript():
     })
 
 
+@app.route('/api/caption-tracks', methods=['POST'])
+def get_caption_tracks():
+    """
+    Hybrid caption path: list the video's caption tracks server-side and return
+    the signed timedtext URL the BROWSER should fetch. See select_caption_track_url
+    for why this split exists (innertube listing is CORS-blocked in the browser,
+    but the timedtext download it yields is CORS-open and not IP-locked, and is
+    the part that must come from the user's residential IP to dodge YouTube's
+    datacenter-IP block).
+
+    Request: { "url": <video url or id>, "from_lang": <code> }
+    Response: { "video_id", "url", "is_correct_lang", "tlang", "language_code" }
+
+    The frontend then GETs `url` (appending &fmt=json3, plus the caller's own fmt
+    handling), parses the snippets, and posts them back to /api/transcript as
+    client_snippets — so grouping/translation are unchanged.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    video_url = data.get('url')
+    from_lang = data.get('from_lang', 'en')
+    if not video_url or not isinstance(video_url, str):
+        return jsonify({"error": "URL is required"}), 400
+    if not isinstance(from_lang, str) or not from_lang.strip():
+        return jsonify({"error": "from_lang must be a language code string"}), 400
+
+    video_id = extract_video_id(video_url)
+    if not video_id:
+        return jsonify({"error": "Could not parse a YouTube video ID from the provided URL"}), 400
+
+    try:
+        track = select_caption_track_url(video_id, from_lang)
+    except Exception as e:
+        msg = str(e)
+        low = msg.lower()
+        print(f"Error listing caption tracks for {video_id}: {type(e).__name__}: {msg}")
+        # Same status mapping as /api/transcript so the client can treat both
+        # paths' errors identically.
+        if "blocked" in low or ("ip" in low and "block" in low):
+            return jsonify({
+                "error": "YouTube is currently blocking transcript requests from the server. "
+                         "Please try again in a moment.",
+            }), 503
+        if "disabled" in low or "no transcript" in low or "transcriptsdisabled" in low or "no transcripts are available" in low:
+            return jsonify({
+                "error": "This video doesn't have subtitles available for the requested language.",
+            }), 404
+        if "unavailable" in low or "no longer available" in low:
+            return jsonify({
+                "error": "This video is unavailable. Please check the link and try another video.",
+            }), 404
+        return jsonify({
+            "error": "We couldn't list subtitles for this video. It may have subtitles "
+                     "disabled, be unavailable, or not offer the requested language.",
+        }), 502
+
+    return jsonify({
+        "video_id": video_id,
+        "url": track["url"],
+        "is_correct_lang": track["is_correct_lang"],
+        "tlang": track["tlang"],
+        "language_code": track["language_code"],
+    })
+
+
 @app.route('/api/translate', methods=['POST'])
 def translate_text():
     data = request.get_json(silent=True)
@@ -2970,6 +3116,7 @@ def clear_translation_cache():
     # already-cached video until the process restarts or the entry is evicted.
     get_cached_transcript.cache_clear()
     get_cached_processed_snippets.cache_clear()
+    select_caption_track_url.cache_clear()
 
     if not redis_client:
         return jsonify({
