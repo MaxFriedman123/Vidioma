@@ -84,6 +84,12 @@ const snippets = [
 const paragraphs = ['hello world'];
 const translatedParagraphs = ['hola mundo'];
 
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 function renderApp() {
   return render(
     <AuthProvider>
@@ -293,5 +299,89 @@ describe('Playback overlay behavior', () => {
     });
 
     expect(screen.queryByText('Tap to Start')).not.toBeInTheDocument();
+  });
+
+  test('home autostart waits for the starting paragraph translation before playing', async () => {
+    // Transcript resolves immediately (e.g. server had it cached), but the
+    // translation is deferred — the regression: the video used to start playing
+    // while the translation was still pending, stranding the user on a line the
+    // answer box refuses (no paragraph translation yet).
+    setUpGuestSession();
+    const translation = createDeferred();
+    axios.post.mockImplementation((url) => {
+      if (url.includes('/api/transcript')) {
+        return Promise.resolve({ data: { snippets, paragraphs } });
+      }
+      if (url.includes('/api/translate')) {
+        return translation.promise;
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    await act(async () => { renderApp(); });
+    fireEvent.change(screen.getByPlaceholderText('Paste YouTube URL...'), {
+      target: { value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'GO' }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('youtube-player')).toBeInTheDocument();
+    });
+
+    // Let the autostart effect's 500ms timer and a couple of recheck ticks fire.
+    await act(async () => { jest.advanceTimersByTime(2000); });
+
+    // Translation still pending -> the video must NOT have started.
+    expect(mockLatestPlayer.playVideo).not.toHaveBeenCalled();
+
+    // Translation lands -> autostart is now allowed to fire.
+    await act(async () => {
+      translation.resolve({ data: { translated_paragraphs: translatedParagraphs, translated_lines: [['hola', 'mundo']] } });
+    });
+    await act(async () => { jest.advanceTimersByTime(600); });
+
+    expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
+  });
+
+  test('home autostart falls back to playing if the translation is very slow', async () => {
+    // Safety valve: a translation that never resolves must not block playback
+    // forever — after the max-wait the video starts anyway (delayed, not denied).
+    setUpGuestSession();
+    const translation = createDeferred(); // never resolved
+    axios.post.mockImplementation((url) => {
+      if (url.includes('/api/transcript')) {
+        return Promise.resolve({ data: { snippets, paragraphs } });
+      }
+      if (url.includes('/api/translate')) {
+        return translation.promise;
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    await act(async () => { renderApp(); });
+    fireEvent.change(screen.getByPlaceholderText('Paste YouTube URL...'), {
+      target: { value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'GO' }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('youtube-player')).toBeInTheDocument();
+    });
+
+    // Before the max-wait elapses, playback is still held.
+    await act(async () => { jest.advanceTimersByTime(2000); });
+    expect(mockLatestPlayer.playVideo).not.toHaveBeenCalled();
+
+    // Past the safety timeout (~30 rechecks * 400ms + the 500ms start timer) ->
+    // the video starts regardless. Each recheck tick is a state update that
+    // schedules the next timer, so drive them one at a time with a React flush
+    // between, the way they'd fire in real time.
+    for (let i = 0; i < 40; i++) {
+      await act(async () => { jest.advanceTimersByTime(400); });
+    }
+    await act(async () => { jest.advanceTimersByTime(600); });
+    expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
   });
 });

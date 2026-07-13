@@ -323,6 +323,16 @@ function App() {
   const [needsManualPlay, setNeedsManualPlay] = useState(false);
   const playbackAttemptTimeoutsRef = useRef([]);
   const dashboardStartPromptActiveRef = useRef(false);
+  // Guards the one-time initial autostart so it fires exactly once per video
+  // session, only after the starting paragraph's translation is ready (see the
+  // autostart effect). Reset when a new player session begins.
+  const initialAutoStartDoneRef = useRef(false);
+  // Counts how many rechecks the autostart effect has spent waiting for the
+  // starting paragraph's translation, so it can enforce a max-wait safety valve
+  // (start anyway after N rechecks). `playbackWaitTick` just re-runs the effect
+  // while it polls for readiness.
+  const playbackWaitStartRef = useRef(0);
+  const [playbackWaitTick, setPlaybackWaitTick] = useState(0);
   const [playbackLaunchSource, setPlaybackLaunchSource] = useState('home');
   const activePlayerSessionRef = useRef(0);
   const transcriptRequestControllerRef = useRef(null);
@@ -483,7 +493,47 @@ function App() {
         return undefined;
       }
 
+      // Only auto-start once per session. After the first start the user drives
+      // playback line-by-line, so re-running this effect (e.g. when a lookahead
+      // translation lands and flips translatedParagraphs) must not re-trigger it.
+      if (initialAutoStartDoneRef.current) return undefined;
+
+      // Hold the initial autostart until the STARTING paragraph's translation is
+      // ready. When the server already had the transcript cached but not the
+      // translations, the video would otherwise start immediately while the
+      // translation area still shows a skeleton — and the answer box rejects
+      // input until the paragraph translation exists (processInputSubmit), so the
+      // user is stuck on a playing-but-unanswerable line. We wait for the current
+      // paragraph to be 'ready' (or 'failed', so a provider outage can't block
+      // playback forever). A safety timeout starts the video regardless if the
+      // translation is unusually slow, so playback is delayed, never denied.
+      const startLine = transcript[currentLineIndex];
+      const startParagraphIdx = startLine?.paragraph ?? 0;
+      const startStatus = translationStatus[startParagraphIdx];
+      const startTranslationSettled =
+        startStatus === 'ready' || startStatus === 'failed' ||
+        hasOwn(translatedParagraphs, startParagraphIdx);
+
+      // Max wait expressed as recheck ticks (each ~RECHECK_MS) rather than
+      // wall-clock, so the safety valve is driven by the same timers as the
+      // rechecks and can't be defeated by a frozen clock. ~12s total.
+      const RECHECK_MS = 400;
+      const START_TRANSLATION_MAX_RECHECKS = 30;
+      const waitedTooLong = (playbackWaitStartRef.current || 0) >= START_TRANSLATION_MAX_RECHECKS;
+
+      if (!startTranslationSettled && !waitedTooLong) {
+        // Not ready yet. Count this recheck and poll again shortly; the effect
+        // also re-runs when translationStatus/translatedParagraphs change, so a
+        // translation that lands sooner starts playback without waiting for the
+        // next tick.
+        playbackWaitStartRef.current = (playbackWaitStartRef.current || 0) + 1;
+        const recheck = setTimeout(() => setPlaybackWaitTick((t) => t + 1), RECHECK_MS);
+        return () => clearTimeout(recheck);
+      }
+
       const playTimer = setTimeout(() => {
+        initialAutoStartDoneRef.current = true;
+        playbackWaitStartRef.current = null;
         attemptPlayback({ seekToCurrentLine: true, allowMutedFallback: true });
       }, 500);
 
@@ -494,7 +544,7 @@ function App() {
     }
 
     return undefined;
-  }, [player, isPlayerReady, isLoading, transcript, attemptPlayback, clearPlaybackAttemptTimers, playbackLaunchSource]);
+  }, [player, isPlayerReady, isLoading, transcript, attemptPlayback, clearPlaybackAttemptTimers, playbackLaunchSource, currentLineIndex, translationStatus, translatedParagraphs, playbackWaitTick]);
 
   const beginPlayerSession = useCallback(({ nextUrl, nextVideoId, launchSource }) => {
     activePlayerSessionRef.current += 1;
@@ -514,6 +564,8 @@ function App() {
     setView('player');
     setPlaybackLaunchSource(launchSource);
     dashboardStartPromptActiveRef.current = launchSource === 'dashboard';
+    initialAutoStartDoneRef.current = false;
+    playbackWaitStartRef.current = null;
 
     setTranscript([]);
     setParagraphs([]);
@@ -786,6 +838,8 @@ function App() {
     setNeedsManualPlay(false);
     setPlaybackLaunchSource('home');
     dashboardStartPromptActiveRef.current = false;
+    initialAutoStartDoneRef.current = false;
+    playbackWaitStartRef.current = null;
     activeAssignmentRef.current = null;
     setAssignmentBanner(null);
   }, [player, flushProgress, clearPlaybackAttemptTimers, cancelActivePlayerRequests]);
@@ -803,6 +857,10 @@ function App() {
   };
 
   const handleManualPlay = () => {
+    // A manual start counts as the initial start, so the autostart effect won't
+    // also fire (and won't sit waiting on a translation the user chose to skip).
+    initialAutoStartDoneRef.current = true;
+    playbackWaitStartRef.current = null;
     attemptPlayback({ seekToCurrentLine: true, allowMutedFallback: true, unmuteAfterStart: true });
   };
 
