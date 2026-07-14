@@ -1,0 +1,4 @@
+# Test/dev-only dependencies (not installed in production). CI installs this on
+# top of requirements.txt. Keeps pytest & friends out of the runtime image.
+-r requirements.txt
+pytest

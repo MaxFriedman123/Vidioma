@@ -1,13 +1,19 @@
-Flask
-flask-cors
-deep-translator
-translators
-# Pinned: the cold-load fast-fetch path in app.py feature-detects this library's
+# Pinned to exact versions for reproducible builds (Render re-resolves on every
+# deploy; unpinned deps meant a silent breaking upgrade could ship to prod).
+# CI validates the app against these; bump deliberately and let CI catch breaks.
+Flask==3.1.3
+flask-cors==6.0.5
+flask-limiter==4.1.1
+deep-translator==1.11.4
+# `translators` scrapes translation sites and breaks when their markup changes;
+# pin hard so a fallback-engine change never lands unnoticed.
+translators==6.0.4
+# The cold-load fast-fetch path in app.py feature-detects this library's
 # internals (innertube fetcher) and falls back to the stock path if they change,
 # but pinning keeps the fast path valid and behavior reproducible across deploys.
 youtube-transcript-api==1.2.4
-redis
-requests[socks]
-gunicorn
-python-dotenv
-PyJWT[crypto]
+redis==8.0.1
+requests[socks]==2.34.2
+gunicorn==26.0.0
+python-dotenv==1.2.2
+PyJWT[crypto]==2.13.0

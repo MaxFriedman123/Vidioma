@@ -4,6 +4,12 @@ load_dotenv()  # Load environment variables from .env file
 
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+except Exception:  # pragma: no cover - limiter optional; app runs unthrottled if absent
+    Limiter = None
+    get_remote_address = None
 from youtube_transcript_api import YouTubeTranscriptApi
 try:
     from youtube_transcript_api.proxies import GenericProxyConfig
@@ -219,6 +225,14 @@ def _new_transcript_api():
 app = Flask(__name__)
 CORS(app)
 
+# Hard cap on request body size (rejected by Flask before any parsing), so a
+# giant POST can't exhaust memory or feed the translate/transcript size caps a
+# huge payload to count. The largest legitimate body is a full client-snippet
+# transcript (~5000 short lines) or a max translate payload (~500K chars); 8 MB
+# is comfortable headroom. Env-tunable. Oversized requests get a 413.
+MAX_CONTENT_LENGTH = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(8 * 1024 * 1024)))
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+
 import gzip as _gzip
 
 # Transcript and translate payloads are sizeable JSON (snippets + paragraphs +
@@ -373,6 +387,64 @@ try:
 except Exception as e:
     print(f"Warning: Redis connection failed ({e}). Caching will be disabled.")
     redis_client = None
+
+
+# ── Rate limiting ──────────────────────────────────────────────────────────
+# The public caption/translate endpoints are unauthenticated and expensive
+# (each cache-miss paragraph is a DeepL call against a finite monthly quota, and
+# each request can hold a worker for tens of seconds). Without a limit, a single
+# client sending unique text can drain the DeepL quota and saturate the workers.
+# Per-IP limits bound that. Storage is the same Redis as the cache so the limit
+# is shared across gunicorn workers (in-memory storage would give each worker
+# its own counter -> N x the intended limit). If Redis is down, Limiter falls
+# back to in-memory (per-worker) automatically, which still bounds abuse.
+#
+# Limits are env-tunable so a classroom behind one NAT IP (many students, one
+# public IP) can be given more headroom without a code change.
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1") not in ("0", "false", "False", "")
+# Generous global default; the hot endpoints get their own tighter limits below.
+RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "240 per hour;60 per minute")
+RATE_LIMIT_TRANSCRIPT = os.environ.get("RATE_LIMIT_TRANSCRIPT", "30 per minute;300 per hour")
+RATE_LIMIT_TRANSLATE = os.environ.get("RATE_LIMIT_TRANSLATE", "30 per minute;300 per hour")
+RATE_LIMIT_CAPTION_TRACKS = os.environ.get("RATE_LIMIT_CAPTION_TRACKS", "60 per minute;600 per hour")
+
+limiter = None
+if Limiter is not None and RATE_LIMIT_ENABLED:
+    try:
+        # storage_uri="" (omitted) -> in-memory; pass Redis when available.
+        _limiter_storage = REDIS_URL if redis_client is not None else "memory://"
+        limiter = Limiter(
+            key_func=get_remote_address,
+            app=app,
+            default_limits=[RATE_LIMIT_DEFAULT],
+            storage_uri=_limiter_storage,
+            strategy="fixed-window",
+            headers_enabled=True,  # emit X-RateLimit-* so clients can back off
+        )
+        print(f"Rate limiting enabled (storage: {'redis' if redis_client else 'memory'}).")
+    except Exception as e:
+        print(f"Warning: rate limiter init failed ({e}); running unthrottled.")
+        limiter = None
+else:
+    print("Rate limiting disabled.")
+
+
+def _rate_limit(limit_str):
+    """Apply a per-endpoint limit when the limiter is active; no-op otherwise so
+    the app still runs (and tests pass) when flask-limiter is absent/disabled."""
+    def decorator(f):
+        if limiter is None:
+            return f
+        return limiter.limit(limit_str)(f)
+    return decorator
+
+
+@app.errorhandler(429)
+def _ratelimit_exceeded(e):
+    return jsonify({
+        "error": "You're making requests too quickly. Please wait a moment and try again.",
+    }), 429
+
 
 @app.route('/')
 def home():
@@ -1790,6 +1862,14 @@ def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source
 _MAX_CLIENT_SNIPPETS = 5000
 _MAX_CLIENT_SNIPPET_CHARS = 2000    # a single caption line is a few dozen chars
 
+# Size caps for /api/translate. Each cache-miss paragraph is a DeepL call against
+# a finite monthly quota, so the paragraph COUNT and total character volume must
+# be bounded (the per-paragraph alignment is already size-guarded, but the count
+# was not). A real transcript is at most a few thousand short paragraphs; these
+# are generous for legitimate use and reject only crafted quota-drain payloads.
+_MAX_TRANSLATE_PARAGRAPHS = 5000
+_MAX_TRANSLATE_TOTAL_CHARS = 500_000
+
 
 def _validate_client_snippets(raw):
     """Validate + normalize browser-fetched caption snippets into the internal
@@ -1835,6 +1915,7 @@ def _validate_client_snippets(raw):
 
 
 @app.route('/api/transcript', methods=['POST'])
+@_rate_limit(RATE_LIMIT_TRANSCRIPT)
 def get_transcript():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -1929,6 +2010,7 @@ def get_transcript():
 
 
 @app.route('/api/caption-tracks', methods=['POST'])
+@_rate_limit(RATE_LIMIT_CAPTION_TRACKS)
 def get_caption_tracks():
     """
     Hybrid caption path: list the video's caption tracks server-side and return
@@ -1996,6 +2078,7 @@ def get_caption_tracks():
 
 
 @app.route('/api/translate', methods=['POST'])
+@_rate_limit(RATE_LIMIT_TRANSLATE)
 def translate_text():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -2012,6 +2095,13 @@ def translate_text():
         return jsonify({"error": "every element of paragraphs must be a string"}), 400
     if not isinstance(from_lang, str) or not isinstance(to_lang, str):
         return jsonify({"error": "from_lang and to_lang must be language code strings"}), 400
+    # Bound the work per request so a caller can't drain the DeepL quota / pin a
+    # worker with an oversized payload (rate limiting bounds request frequency;
+    # this bounds the cost of a single request).
+    if len(paragraphs) > _MAX_TRANSLATE_PARAGRAPHS:
+        return jsonify({"error": f"Too many paragraphs (max {_MAX_TRANSLATE_PARAGRAPHS})."}), 413
+    if sum(len(p) for p in paragraphs) > _MAX_TRANSLATE_TOTAL_CHARS:
+        return jsonify({"error": f"Payload too large (max {_MAX_TRANSLATE_TOTAL_CHARS} characters)."}), 413
 
     # Alignment is only requested when `lines` is a nested list matching the
     # paragraph count AND each entry is itself a list of strings.

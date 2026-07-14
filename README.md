@@ -268,8 +268,13 @@ python manual_api_smoke_test.py
 
 ## Tests
 
-- Backend: `cd backend && python -m pytest -q`
+- Backend: `cd backend && pip install -r requirements-dev.txt && python -m pytest -q`
 - Frontend: `cd frontend && CI=true npx react-scripts test --watchAll=false`
+
+Both suites (plus the frontend production build) run automatically on every push
+and pull request via GitHub Actions (`.github/workflows/ci.yml`), gating deploys
+to `main`. `smoke_api.py` is a manual latency check against a locally running
+server, not part of the automated suite.
 
 ## License
 
