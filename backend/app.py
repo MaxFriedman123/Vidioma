@@ -2323,7 +2323,7 @@ def _ensure_video(youtube_id, title=None, thumbnail_url=None):
 
 
 @app.route("/api/db-keepalive", methods=["GET", "POST"])
-@_rate_limit("6 per hour")
+@_rate_limit("60 per hour")
 def db_keepalive():
     """Touch the database so Supabase counts the project as active.
 
@@ -2335,8 +2335,15 @@ def db_keepalive():
     Unauthenticated on purpose: the caller is a cron job with no user identity,
     and this needs no secret because it reveals nothing and writes nothing. It
     performs the cheapest possible real read (one existing row's id from
-    `videos`), which is enough to count as activity. The rate limit caps abuse
-    at a handful of no-op reads per hour per IP.
+    `videos`), which is enough to count as activity.
+
+    The limit is deliberately loose for its ~15-calls-a-month caller. Behind
+    Render's proxy, get_remote_address sees the proxy IP, so limiter buckets are
+    effectively GLOBAL rather than per-IP (verified in prod: a request from a
+    laptop and one from a Cloudflare Worker shared a counter). A tight limit here
+    would therefore let any unrelated caller lock out the cron, and a locked-out
+    tick means waiting 2 days for the next one. Still bounded, because the read
+    is O(1) and Supabase-cached.
     """
     if not supabase_ready:
         return jsonify({"ok": False, "error": "Database not configured"}), 503

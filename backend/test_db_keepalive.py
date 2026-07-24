@@ -45,9 +45,9 @@ class DbKeepaliveTest(unittest.TestCase):
     def _ping(self, method="post"):
         """Issue the request from a fresh IP.
 
-        The endpoint's real "6 per hour" limit is deliberately tight, and the
-        limiter is per-IP, so reusing one address would exhaust it partway
-        through the suite and turn later assertions into spurious 429s. Same
+        Locally the limiter keys on the real client address, so a fresh IP per
+        request keeps the endpoint's own limit from being exhausted partway
+        through the suite and turning later assertions into spurious 429s. Same
         approach as test_rate_limiting.py's per-IP cases.
         """
         type(self)._ip_seq += 1

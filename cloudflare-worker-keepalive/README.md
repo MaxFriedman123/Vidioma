@@ -21,7 +21,13 @@ set this up.
 `/api/db-keepalive` is unauthenticated for the same reason: the caller is a cron
 job with no user identity. It is safe to leave open because it reveals nothing
 (the response is just `{ok, pinged_at}`), writes nothing, and is rate-limited to
-6 requests per hour per IP.
+60 requests per hour.
+
+The limit is loose for a caller that runs ~15 times a month because behind
+Render's proxy the limiter's buckets are effectively global rather than per-IP
+(`get_remote_address` sees the proxy, not the client). A tight limit here would
+let any unrelated traffic lock out the cron, and a locked-out tick means waiting
+2 days for the next one.
 
 ## Setup
 

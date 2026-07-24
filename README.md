@@ -256,7 +256,7 @@ one column, one row) and writes nothing.
 ```
 
 Errors: `503` when Supabase is not configured, `502` when the read failed. Both
-mean the project was **not** touched. Rate-limited to 6 requests per hour per IP.
+mean the project was **not** touched. Rate-limited to 60 requests per hour.
 
 ## Caching Behavior
 
