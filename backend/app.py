@@ -2322,6 +2322,37 @@ def _ensure_video(youtube_id, title=None, thumbnail_url=None):
     return result[0]["id"]
 
 
+@app.route("/api/db-keepalive", methods=["GET", "POST"])
+@_rate_limit("6 per hour")
+def db_keepalive():
+    """Touch the database so Supabase counts the project as active.
+
+    A Supabase free-plan project pauses after 7 consecutive days without
+    activity, and un-pausing is a manual dashboard action; while paused, auth,
+    saved progress, classes, and assignments are all down. An external
+    scheduler (see cloudflare-worker-keepalive/) calls this on a timer.
+
+    Unauthenticated on purpose: the caller is a cron job with no user identity,
+    and this needs no secret because it reveals nothing and writes nothing. It
+    performs the cheapest possible real read (one existing row's id from
+    `videos`), which is enough to count as activity. The rate limit caps abuse
+    at a handful of no-op reads per hour per IP.
+    """
+    if not supabase_ready:
+        return jsonify({"ok": False, "error": "Database not configured"}), 503
+
+    try:
+        # select=id&limit=1 keeps this to a single indexed row; the response
+        # body is discarded, only reaching the DB matters.
+        _sb_get("videos", {"select": "id", "limit": "1"})
+        return jsonify({"ok": True, "pinged_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        print(f"/api/db-keepalive error: {e}")
+        # Surfaced as non-200 so a failing keep-alive is visible to the caller's
+        # run history rather than silently passing.
+        return jsonify({"ok": False, "error": "Database ping failed"}), 502
+
+
 @app.route("/api/progress", methods=["GET"])
 @require_auth
 def get_all_progress():

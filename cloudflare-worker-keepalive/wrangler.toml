@@ -1,0 +1,20 @@
+name = "vidioma-supabase-keepalive"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# Free tier: cron triggers are included, and this runs ~15 times a month.
+workers_dev = true
+
+[vars]
+# Your deployed backend's base URL, e.g. https://vidioma-backend.onrender.com.
+# Plain [vars] rather than a secret because this is a public URL, not a
+# credential -- the backend holds the Supabase service key, this Worker holds
+# nothing. Edit this value before deploying.
+BACKEND_URL = "https://REPLACE-WITH-YOUR-BACKEND.onrender.com"
+
+[triggers]
+# 06:12 UTC every 2nd day. Every 2 days (not every 6) leaves room for two
+# consecutive missed runs before the 7-day pause threshold is reached. The odd
+# minute avoids the top-of-hour spike when Cloudflare schedules the most crons,
+# which is when a run is most likely to be delayed.
+crons = ["12 6 */2 * *"]

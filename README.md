@@ -42,6 +42,9 @@ Vidioma/
     package.json
     src/
     public/
+  cloudflare-worker/           caption-list relay (see its README)
+  cloudflare-worker-keepalive/ Supabase anti-pause cron (see its README)
+  docs/
   README.md
 ```
 
@@ -241,6 +244,20 @@ With alignment (`lines` supplied), the response also contains
 Errors: `400` when the body is not a JSON object, `paragraphs` is missing/not a
 list of strings, or `from_lang`/`to_lang` are not strings.
 
+### `GET|POST /api/db-keepalive`
+
+Touches the database so Supabase counts the project as active (see [Keeping
+Supabase Awake](#keeping-supabase-awake)). Takes no body and needs no auth: the
+caller is a cron job with no user identity. Does one indexed read (`videos`,
+one column, one row) and writes nothing.
+
+```json
+{ "ok": true, "pinged_at": "2026-07-24T06:12:03.114221+00:00" }
+```
+
+Errors: `503` when Supabase is not configured, `502` when the read failed. Both
+mean the project was **not** touched. Rate-limited to 6 requests per hour per IP.
+
 ## Caching Behavior
 
 - In-memory LRU cache is used for the server-side transcript fetch and processed transcript snippets.
@@ -260,6 +277,16 @@ Run it after the backend is running:
 cd backend
 python manual_api_smoke_test.py
 ```
+
+## Keeping Supabase Awake
+
+A Supabase free-plan project pauses after 7 consecutive days without activity,
+which takes down auth, saved progress, classes, and assignments until it is
+manually restored from the dashboard. `cloudflare-worker-keepalive/` is a cron
+Worker that calls `GET|POST /api/db-keepalive` every 2 days; the endpoint does one
+cheap indexed read, which is enough to reset Supabase's idle clock. The Worker
+stores no credentials; the backend uses the service key it already has. See that
+directory's README for setup.
 
 ## Current Limitations
 
