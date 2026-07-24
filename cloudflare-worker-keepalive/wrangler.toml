@@ -10,7 +10,7 @@ workers_dev = true
 # Plain [vars] rather than a secret because this is a public URL, not a
 # credential -- the backend holds the Supabase service key, this Worker holds
 # nothing. Edit this value before deploying.
-BACKEND_URL = "https://REPLACE-WITH-YOUR-BACKEND.onrender.com"
+BACKEND_URL = "https://vidioma.onrender.com"
 
 [triggers]
 # 06:12 UTC every 2nd day. Every 2 days (not every 6) leaves room for two
