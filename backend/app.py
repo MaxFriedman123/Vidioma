@@ -4,6 +4,7 @@ load_dotenv()  # Load environment variables from .env file
 
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 try:
     from flask_limiter import Limiter
     from flask_limiter.util import get_remote_address
@@ -394,7 +395,9 @@ except Exception as e:
 # (each cache-miss paragraph is a DeepL call against a finite monthly quota, and
 # each request can hold a worker for tens of seconds). Without a limit, a single
 # client sending unique text can drain the DeepL quota and saturate the workers.
-# Per-IP limits bound that. Storage is the same Redis as the cache so the limit
+# Per-IP limits bound that (see TRUSTED_PROXY_COUNT below, without which "per-IP"
+# silently degrades to one shared bucket behind a proxy).
+# Storage is the same Redis as the cache so the limit
 # is shared across gunicorn workers (in-memory storage would give each worker
 # its own counter -> N x the intended limit). If Redis is down, Limiter falls
 # back to in-memory (per-worker) automatically, which still bounds abuse.
@@ -407,6 +410,38 @@ RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "240 per hour;60 per m
 RATE_LIMIT_TRANSCRIPT = os.environ.get("RATE_LIMIT_TRANSCRIPT", "30 per minute;300 per hour")
 RATE_LIMIT_TRANSLATE = os.environ.get("RATE_LIMIT_TRANSLATE", "30 per minute;300 per hour")
 RATE_LIMIT_CAPTION_TRACKS = os.environ.get("RATE_LIMIT_CAPTION_TRACKS", "60 per minute;600 per hour")
+
+# Number of trusted reverse proxies in front of the app, used to pick the client
+# address out of X-Forwarded-For. On a PaaS host (Render) exactly one load
+# balancer terminates TLS and appends the caller's address, so the LAST entry is
+# the only trustworthy one.
+#
+# This must not be larger than the real hop count. X-Forwarded-For is
+# caller-supplied, so trusting an extra hop means trusting a value the caller
+# wrote: anyone could vary a spoofed entry per request and get an unlimited
+# number of fresh rate-limit buckets. Reading exactly TRUSTED_PROXY_COUNT entries
+# from the right means only the proxy's own append is ever used.
+#
+# Set to 0 for a direct-to-app deployment (no proxy), where XFF must be ignored
+# entirely and the socket address is authoritative.
+TRUSTED_PROXY_COUNT = int(os.environ.get("TRUSTED_PROXY_COUNT", "1"))
+
+# Without this, get_remote_address() returns the PROXY's address for every
+# request, so all clients share ONE rate-limit bucket: a single busy user (or the
+# same person on a second device) exhausts the limit for everybody, and the
+# per-endpoint limits below are global rather than per-client. ProxyFix rewrites
+# REMOTE_ADDR from the trusted tail of X-Forwarded-For so the limiter keys on the
+# actual client again.
+if TRUSTED_PROXY_COUNT > 0:
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=TRUSTED_PROXY_COUNT,
+        x_proto=TRUSTED_PROXY_COUNT,
+        x_host=TRUSTED_PROXY_COUNT,
+    )
+    print(f"Trusting {TRUSTED_PROXY_COUNT} proxy hop(s) for client IP resolution.")
+else:
+    print("No trusted proxies; using the socket address for client IP.")
 
 limiter = None
 if Limiter is not None and RATE_LIMIT_ENABLED:

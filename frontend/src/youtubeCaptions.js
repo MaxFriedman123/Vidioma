@@ -69,6 +69,22 @@ const TIMEDTEXT_TIMEOUT_MS = 15000;
 const RELAY_LIST_MAX_TRIES = 6;
 const RELAY_LIST_RETRY_DELAY_MS = 700;
 
+// Overall ceiling for resolving a caption track, across the direct innertube
+// attempt and every relay/backend retry.
+//
+// The per-call timeouts above bound each request but nothing bounded the SUM: on
+// a slow connection where each attempt times out rather than failing fast, the
+// worst case was 2 innertube hosts + 6 relay tries + 1 backend try = ~111s of
+// waiting BEFORE /api/transcript was even called, on top of that request's own
+// 90s budget. On a phone (higher latency, background throttling, network
+// switches) that is reached far more easily than on a desktop, which is why this
+// presented as "works on my computer but not my phone": the user sat through a
+// long spin and then got a failure.
+//
+// Once this elapses we stop retrying and return null, which falls back to the
+// server-side fetch exactly as any other caption failure does.
+const CAPTION_RESOLVE_BUDGET_MS = 25000;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const baseLang = (code) => (code || '').toLowerCase().split('-')[0];
@@ -87,9 +103,13 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 
 // POST the innertube player endpoint and return its parsed JSON, trying each
 // host in turn. Returns null if none produced a usable (OK, has-tracks) result.
-async function fetchPlayerData(videoId) {
+async function fetchPlayerData(videoId, deadline = Infinity) {
   const body = JSON.stringify({ context: ANDROID_CONTEXT, videoId });
   for (const host of INNERTUBE_HOSTS) {
+    // This path is CORS-blocked from a third-party origin and normally fails in
+    // milliseconds, but if it ever hangs it must not eat the whole budget that
+    // the working (relay) path needs.
+    if (Date.now() >= deadline) return null;
     try {
       const resp = await fetchWithTimeout(
         host,
@@ -99,7 +119,7 @@ async function fetchPlayerData(videoId) {
           headers: { 'Content-Type': 'text/plain' },
           body,
         },
-        INNERTUBE_TIMEOUT_MS,
+        Math.max(1, Math.min(INNERTUBE_TIMEOUT_MS, deadline - Date.now())),
       );
       if (!resp.ok) continue;
       const data = await resp.json();
@@ -232,9 +252,12 @@ async function fetchTimedText(baseUrl, tlang) {
 // request routes through a different PoP. A hard failure (400/404 = bad id / no
 // captions) returns null immediately without retrying. Returns
 // { baseUrl, tlang, isCorrectLang } or null.
-async function fetchTrackFromEndpoint(endpoint, videoId, fromLang, maxTries = 1) {
+async function fetchTrackFromEndpoint(endpoint, videoId, fromLang, maxTries = 1, deadline = Infinity) {
   if (!endpoint) return null;
   for (let attempt = 0; attempt < maxTries; attempt++) {
+    // Out of overall budget: stop retrying and let the caller fall back rather
+    // than keep a user waiting on attempts that no longer fit.
+    if (Date.now() >= deadline) return null;
     let transient = false;
     try {
       const resp = await fetchWithTimeout(
@@ -244,7 +267,8 @@ async function fetchTrackFromEndpoint(endpoint, videoId, fromLang, maxTries = 1)
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: videoId, from_lang: fromLang }),
         },
-        INNERTUBE_TIMEOUT_MS,
+        // Never wait past the overall deadline on a single attempt.
+        Math.max(1, Math.min(INNERTUBE_TIMEOUT_MS, deadline - Date.now())),
       );
       if (resp.ok) {
         const data = await resp.json();
@@ -262,7 +286,10 @@ async function fetchTrackFromEndpoint(endpoint, videoId, fromLang, maxTries = 1)
       transient = true; // network error / timeout -> retry
     }
     if (!transient) return null;
-    if (attempt < maxTries - 1) await sleep(RELAY_LIST_RETRY_DELAY_MS);
+    // Skip the inter-try pause when there is no budget left for another attempt.
+    if (attempt < maxTries - 1 && Date.now() + RELAY_LIST_RETRY_DELAY_MS < deadline) {
+      await sleep(RELAY_LIST_RETRY_DELAY_MS);
+    }
   }
   return null;
 }
@@ -290,11 +317,16 @@ async function fetchTrackFromEndpoint(endpoint, videoId, fromLang, maxTries = 1)
 export async function fetchClientCaptions(videoId, fromLang, apiBaseUrl, relayUrl) {
   if (!videoId) return null;
 
+  // One budget for the whole track-resolution phase, so a slow network can't
+  // stack every per-call timeout into a multi-minute wait before the caller's
+  // own transcript request even starts.
+  const deadline = Date.now() + CAPTION_RESOLVE_BUDGET_MS;
+
   // Resolve the track to download: DIRECT innertube first, then HYBRID via a
   // relay/backend. `choice` is { baseUrl, tlang, isCorrectLang }.
   let choice = null;
   try {
-    const playerData = await fetchPlayerData(videoId);
+    const playerData = await fetchPlayerData(videoId, deadline);
     if (playerData) {
       const { tracks, translationTargets } = extractCaptions(playerData);
       const direct = selectTrack(tracks, translationTargets, fromLang);
@@ -310,10 +342,16 @@ export async function fetchClientCaptions(videoId, fromLang, apiBaseUrl, relayUr
   // fresh request can land on a different, un-throttled Cloudflare egress); the
   // backend gets a single try (its egress isn't the bottleneck being retried).
   if (!choice && relayUrl) {
-    choice = await fetchTrackFromEndpoint(relayUrl, videoId, fromLang, RELAY_LIST_MAX_TRIES);
+    choice = await fetchTrackFromEndpoint(relayUrl, videoId, fromLang, RELAY_LIST_MAX_TRIES, deadline);
   }
   if (!choice && apiBaseUrl) {
-    choice = await fetchTrackFromEndpoint(`${apiBaseUrl}/api/caption-tracks`, videoId, fromLang, 1);
+    // Always give the backend one attempt even if the relay used up the budget:
+    // it's the last chance at a client-side caption path, and skipping it would
+    // force the server-side fetch (which YouTube IP-blocks on our host).
+    const backendDeadline = Math.max(deadline, Date.now() + INNERTUBE_TIMEOUT_MS);
+    choice = await fetchTrackFromEndpoint(
+      `${apiBaseUrl}/api/caption-tracks`, videoId, fromLang, 1, backendDeadline,
+    );
   }
   if (!choice || !choice.baseUrl) return null;
 

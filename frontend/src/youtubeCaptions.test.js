@@ -389,3 +389,86 @@ describe('fetchClientCaptions Cloudflare Worker relay path', () => {
     expect(seen).not.toContain('backend'); // backend never needed
   }, 15000);
 });
+
+describe('overall caption-resolution budget (slow-network / mobile)', () => {
+  const API = 'https://api.example.test';
+  const RELAY = 'https://relay.example.workers.dev';
+
+  // On a phone the per-call timeouts used to stack: 2 innertube hosts + 6 relay
+  // retries + 1 backend try could burn ~111s BEFORE /api/transcript was called,
+  // which showed up as a long spinner followed by a failure. A single overall
+  // budget has to cap that.
+  // The budget is wall-clock, and this Jest version has no
+  // advanceTimersByTimeAsync, so instead of stalling each attempt for its full
+  // timeout (which would make this test take ~40s) the stub reports the
+  // transient failure immediately and we assert on the ATTEMPT COUNT: the budget
+  // is what stops the retry loop early.
+  test('stops retrying the relay once the budget is spent', async () => {
+    {
+      let relayHits = 0;
+      let backendHits = 0;
+      // Each relay attempt "costs" this much of the budget, simulating a slow
+      // mobile connection without actually waiting.
+      const SIMULATED_COST_MS = 9000;
+      let clock = Date.now();
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+
+      global.fetch = jest.fn((url) => {
+        if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+          return Promise.reject(new TypeError('Failed to fetch')); // CORS block
+        }
+        if (url === RELAY) {
+          relayHits += 1;
+          clock += SIMULATED_COST_MS;
+          // 503 = the transient, retryable egress rate-limit.
+          return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+        }
+        if (typeof url === 'string' && url.includes('/api/caption-tracks')) {
+          backendHits += 1;
+          clock += SIMULATED_COST_MS;
+          return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+        }
+        return Promise.resolve({ ok: false, status: 500 });
+      });
+
+      await expect(fetchClientCaptions('vid', 'es', API, RELAY)).resolves.toBeNull();
+
+      // Without the budget every one of the 6 relay tries would run. At 9s of
+      // simulated cost each, the 25s budget must stop it after ~3.
+      expect(relayHits).toBeGreaterThan(0);
+      expect(relayHits).toBeLessThan(6);
+      // The backend still gets its one last-chance attempt.
+      expect(backendHits).toBe(1);
+
+      Date.now.mockRestore();
+    }
+  });
+
+  test('a fast relay success is unaffected by the budget', async () => {
+    global.fetch = jest.fn(async (url) => {
+      if (typeof url === 'string' && url.includes('/youtubei/v1/player')) {
+        throw new TypeError('Failed to fetch');
+      }
+      if (url === RELAY) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            video_id: 'vid',
+            url: 'https://www.youtube.com/api/timedtext?v=vid&lang=es&fmt=srv3',
+            is_correct_lang: true, tlang: null, language_code: 'es',
+          }),
+        };
+      }
+      return {
+        ok: true, status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => JSON.parse(json3Body()),
+        text: async () => json3Body(),
+      };
+    });
+
+    const result = await fetchClientCaptions('vid', 'es', API, RELAY);
+    expect(result).not.toBeNull();
+    expect(result.isCorrectLang).toBe(true);
+  });
+});

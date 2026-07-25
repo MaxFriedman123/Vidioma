@@ -54,6 +54,13 @@ const TRANSCRIPT_REQUEST_TIMEOUT_MS = 90000;
 const TRANSCRIPT_TIMEOUT_MESSAGE =
   "This video took too long to load — building the transcript can be slow for long videos or less common languages. Please try again.";
 
+// Paragraph translations had no client timeout at all, so a stalled request left
+// the paragraph 'pending' forever: the translation area kept its skeleton and the
+// autostart gate below waited out its full safety window with nothing to show for
+// it. A bounded request instead fails fast, marks the paragraph 'failed', and
+// lets the existing auto-retry take another run at it.
+const TRANSLATE_REQUEST_TIMEOUT_MS = 45000;
+
 // Languages Array with Flag Image URLs
 const languages = [
   { code: 'en', name: 'English', icon: 'https://flagcdn.com/w40/us.png' },
@@ -776,6 +783,7 @@ function App() {
       to_lang: toLang,
     }, {
       signal: controller.signal,
+      timeout: TRANSLATE_REQUEST_TIMEOUT_MS,
     }).then((response) => {
       if (activePlayerSessionRef.current !== sessionId) return;
 
@@ -1357,11 +1365,21 @@ function App() {
                     }}
                   />
                   {needsManualPlay && !isLoading && transcript.length > 0 && (
-                    <button className="tap-to-play-overlay" onClick={handleManualPlay}>
+                    // Disabled until the starting paragraph's translation is in.
+                    // Mobile browsers block autoplay, so this button (not the
+                    // autostart effect) is how playback begins on a phone, and
+                    // starting here while the translation was still pending
+                    // dropped the user onto a playing line whose answer box
+                    // rejects input. Same rule as the autostart gate above.
+                    <button
+                      className="tap-to-play-overlay"
+                      onClick={handleManualPlay}
+                      disabled={translationPending}
+                    >
                       <svg viewBox="0 0 24 24" width="48" height="48" fill="#fff">
                         <path d="M8 5v14l11-7z"/>
                       </svg>
-                      <span>Tap to Start</span>
+                      <span>{translationPending ? 'Preparing translation...' : 'Tap to Start'}</span>
                     </button>
                   )}
                 </div>

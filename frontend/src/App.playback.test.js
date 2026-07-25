@@ -158,9 +158,22 @@ async function openHomeVideo() {
   });
 }
 
-async function openDashboardVideo() {
+// `translatePromise` lets a caller hold the paragraph translation pending for the
+// whole load, which is the state the Tap to Start gate cares about.
+async function openDashboardVideo({ translatePromise } = {}) {
   setUpAuthSession();
   mockVideoApis();
+  if (translatePromise) {
+    axios.post.mockImplementation((url) => {
+      if (url.includes('/api/transcript')) {
+        return Promise.resolve({ data: { snippets, paragraphs } });
+      }
+      if (url.includes('/api/translate')) {
+        return translatePromise;
+      }
+      return Promise.resolve({ data: {} });
+    });
+  }
   axios.get.mockImplementation((url) => {
     if (url.endsWith('/api/progress')) {
       return Promise.resolve({
@@ -299,6 +312,33 @@ describe('Playback overlay behavior', () => {
     });
 
     expect(screen.queryByText('Tap to Start')).not.toBeInTheDocument();
+  });
+
+  test('Tap to Start is disabled until the starting translation is ready', async () => {
+    // Mobile browsers block autoplay, so on a phone this button is how playback
+    // begins, bypassing the autostart gate entirely. Tapping it while the
+    // paragraph translation was still pending dropped the user onto a playing
+    // line whose answer box refuses input.
+    const translation = createDeferred();
+    await openDashboardVideo({ translatePromise: translation.promise });
+
+    const pending = await screen.findByText('Preparing translation...');
+    const button = pending.closest('button');
+    expect(button).toBeDisabled();
+
+    // Tapping while pending must not start playback.
+    await act(async () => { fireEvent.click(button); });
+    expect(mockLatestPlayer.playVideo).not.toHaveBeenCalled();
+
+    // Once the translation lands the button becomes usable.
+    await act(async () => {
+      translation.resolve({ data: { translated_paragraphs: translatedParagraphs, translated_lines: [['hola', 'mundo']] } });
+    });
+    const ready = await screen.findByText('Tap to Start');
+    expect(ready.closest('button')).not.toBeDisabled();
+
+    await act(async () => { fireEvent.click(ready); });
+    expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
   });
 
   test('home autostart waits for the starting paragraph translation before playing', async () => {
