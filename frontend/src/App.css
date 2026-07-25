@@ -317,6 +317,14 @@
   justify-content: center;
   align-items: center;
   width: 100%;
+  /* Dragging here is the flashlight gesture, not a scroll. Declared as well as
+     preventDefault()ed in the touchmove handler: once a browser has decided a
+     gesture is a scroll it stops honouring preventDefault, so the intent has to be
+     stated up front. Also stops the long-press text selection that a slow drag
+     would otherwise trigger. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .reveal-container .current-text {
@@ -807,7 +815,10 @@
 
   /* Search bar: Row 1 = URL + divider + langs, Row 2 = GO */
   .modern-search-bar {
-    width: calc(100vw - 32px);
+    /* 100% of the container, not 100vw: vw includes the scrollbar gutter, so on a
+       phone that reports one the bar came out wider than the content box and its
+       edges (and the GO button's corners) ran off screen. */
+    width: 100%;
   }
 
   .search-bar-top {
@@ -836,6 +847,16 @@
     height: 44px;
     font-size: 0.95rem;
     border-top: 1px solid #e0e0e0;
+    /* GO wraps BELOW the input here instead of sitting to its right, so the
+       rounding has to move from the right edge to the bottom edge. The base rule's
+       `0 12px 12px 0` left the top-left square and the bottom-left square, which
+       read as corners rounded on the wrong sides. */
+    border-radius: 0 0 12px 12px;
+  }
+
+  /* Row 1 keeps the bar's top corners; the wrapped GO owns the bottom ones. */
+  .search-bar-top {
+    border-radius: 12px 12px 0 0;
   }
 
   /* Landing title */
@@ -850,6 +871,10 @@
     padding: 0 10px;
     margin-top: 10px;
     gap: 14px;
+    /* The base rule sets width: 100% and this adds 10px of side padding. Without
+       border-box the padding is ADDED to that width, making the row 20px wider
+       than the screen and pushing the video and cards off the right edge. */
+    box-sizing: border-box;
   }
 
   /* Video: full width */
@@ -915,8 +940,12 @@
     font-size: 0.95rem;
   }
 
-  /* Guest banner: allow wrapping */
-  .guest-banner {
+  /* Guest banner: allow wrapping.
+     Selector is doubled to raise specificity. The base .guest-banner rule is
+     declared LATER in this file, and at equal specificity source order wins, so
+     every override here (including white-space: normal) was silently losing to
+     the desktop `nowrap` and the text overflowed the box on a phone. */
+  .guest-banner.guest-banner {
     white-space: normal;
     text-align: center;
     flex-wrap: wrap;
@@ -924,9 +953,18 @@
     left: 10px;
     right: 10px;
     transform: none;
-    max-width: calc(100vw - 20px);
+    /* Bounded by the left/right insets above rather than 100vw, which includes the
+       scrollbar gutter and reintroduces the overflow this rule exists to prevent. */
+    max-width: none;
+    width: auto;
     font-size: 0.8rem;
     padding: 8px 12px;
+  }
+
+  /* The label is the widest child; let it wrap instead of forcing the row wider. */
+  .guest-banner span {
+    flex: 1 1 100%;
+    min-width: 0;
   }
 
   /* Feedback link */
@@ -1061,7 +1099,8 @@
     font-size: 1rem;
   }
 
-  .guest-banner {
+  /* Doubled for the same source-order reason as the 768px block above. */
+  .guest-banner.guest-banner {
     font-size: 0.75rem;
     gap: 8px;
   }

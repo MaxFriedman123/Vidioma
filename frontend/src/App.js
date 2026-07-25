@@ -1073,13 +1073,26 @@ function App() {
 
     const handleTouchMove = (e) => {
       const touch = e.touches[0];
-      if (touch) {
-        setCursorViewport({ x: touch.clientX, y: touch.clientY });
-      }
+      if (!touch) return;
+      setCursorViewport({ x: touch.clientX, y: touch.clientY });
+
+      // A drag over the translation area is the flashlight gesture, so it must
+      // NOT also scroll the page: on a phone the reveal slid out from under the
+      // finger as the page moved with it, which made the translations effectively
+      // unreadable. Only that region is claimed, so the rest of the player still
+      // scrolls normally.
+      const box = revealRef.current?.getBoundingClientRect();
+      if (!box) return;
+      const insideReveal =
+        touch.clientX >= box.left && touch.clientX <= box.right &&
+        touch.clientY >= box.top && touch.clientY <= box.bottom;
+      if (insideReveal && e.cancelable) e.preventDefault();
     };
 
     window.addEventListener('mousemove', handleGlobalMouseMove);
-    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    // NOT passive: a passive listener makes preventDefault() a silent no-op, which
+    // is why the drag used to scroll and reveal at the same time.
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
     return () => {
       window.removeEventListener('mousemove', handleGlobalMouseMove);
       window.removeEventListener('touchmove', handleTouchMove);

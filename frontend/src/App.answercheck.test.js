@@ -203,3 +203,62 @@ describe('submitting the exact expected translation', () => {
     expect(input.className).toContain('input-error');
   });
 });
+
+describe('dragging over the translations does not scroll the page', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    mockLatestYouTubeProps = null;
+    mockLatestPlayer = null;
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    act(() => { jest.runOnlyPendingTimers(); });
+    jest.useRealTimers();
+  });
+
+  // On a phone, dragging to reveal a translation also scrolled the page, so the
+  // reveal slid out from under the finger. The touchmove listener has to be
+  // non-passive (a passive one makes preventDefault a silent no-op) and must
+  // claim only the reveal area, leaving the rest of the player scrollable.
+  const dispatchTouchMove = (x, y) => {
+    // jsdom has no TouchEvent constructor; build the shape the handler reads.
+    const event = new Event('touchmove', { bubbles: true, cancelable: true });
+    event.touches = [{ clientX: x, clientY: y }];
+    window.dispatchEvent(event);
+    return event;
+  };
+
+  test('a drag inside the reveal area is prevented, outside it is not', async () => {
+    const input = await openVideoWithTranslation('te he estado esperando todo el dia');
+    expect(input).toBeInTheDocument();
+
+    const reveal = document.querySelector('.reveal-container');
+    expect(reveal).not.toBeNull();
+
+    // jsdom reports zero-size boxes, so give the reveal area a real rect.
+    jest.spyOn(reveal, 'getBoundingClientRect').mockReturnValue({
+      left: 20, right: 300, top: 400, bottom: 500, width: 280, height: 100,
+      x: 20, y: 400, toJSON: () => {},
+    });
+
+    const inside = dispatchTouchMove(160, 450);
+    expect(inside.defaultPrevented).toBe(true);
+
+    // A drag over the video (well above the reveal box) must still scroll.
+    const outside = dispatchTouchMove(160, 120);
+    expect(outside.defaultPrevented).toBe(false);
+  });
+
+  test('a touchmove with no touches is ignored', async () => {
+    await openVideoWithTranslation('te he estado esperando todo el dia');
+
+    const event = new Event('touchmove', { bubbles: true, cancelable: true });
+    event.touches = [];
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
