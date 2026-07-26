@@ -17,7 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Read from backend/.python-version so CI and local cannot drift.
+          python-version-file: backend/.python-version
           cache: pip
           cache-dependency-path: backend/requirements-dev.txt
       - name: Install dependencies
@@ -38,7 +39,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # Read from frontend/.nvmrc so CI and local cannot drift.
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies

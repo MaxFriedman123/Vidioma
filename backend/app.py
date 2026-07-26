@@ -161,7 +161,7 @@ def _install_deep_translator_timeout(default_timeout):
                     _rq.post = _with_timeout(_rq.post)
                     _rq.post._vidioma_timeout_wrapped = True
     except Exception as _exc:  # pragma: no cover - never block startup on this
-        print(f"Warning: could not install deep-translator timeout shim: {_exc}")
+        log.warning("Could not install deep-translator timeout shim: %s", _exc)
 
 
 _install_deep_translator_timeout(_TRANSLATE_CALL_TIMEOUT)
@@ -227,11 +227,11 @@ try:
                 except (_YTARequestBlocked, _YTAIpBlocked):
                     raise
                 except Exception as exc:
-                    print(f"Fast transcript fetch fell back to stock path: {type(exc).__name__}: {str(exc)[:80]}")
+                    log.info("Fast transcript fetch fell back to stock path: %s: %s", type(exc).__name__, str(exc)[:80])
                 # Fallback: the unmodified library path on the SAME http client.
                 return super()._fetch_captions_json(video_id, try_number=try_number)
 except Exception as _exc:  # pragma: no cover - never block startup on this
-    print(f"Warning: fast transcript fetcher unavailable ({_exc}); using stock library path.")
+    log.warning("fast transcript fetcher unavailable (%s); using stock library path.", _exc)
     _FastTranscriptListFetcher = None
 
 
@@ -245,7 +245,7 @@ def _install_fast_fetcher(api):
         stock = api._fetcher
         api._fetcher = _FastTranscriptListFetcher(stock._http_client, proxy_config=stock._proxy_config)
     except Exception as exc:
-        print(f"Warning: could not install fast fetcher ({exc}); using stock path.")
+        log.warning("Could not install fast fetcher (%s); using stock path.", exc)
     return api
 
 
@@ -277,7 +277,7 @@ def _new_transcript_api():
             return YouTubeTranscriptApi(proxy_config=GenericProxyConfig(
                 http_url=CAPTION_PROXY_URL, https_url=CAPTION_PROXY_URL))
         except Exception as exc:
-            print(f"Warning: CAPTION_PROXY_URL set but proxy config failed ({exc}); using direct.")
+            log.warning("CAPTION_PROXY_URL set but proxy config failed (%s); using direct.", exc)
     return YouTubeTranscriptApi()
 
 
@@ -372,7 +372,7 @@ def _gzip_response(response):
         response.headers["Content-Length"] = len(compressed)
         response.headers.add("Vary", "Accept-Encoding")
     except Exception as exc:  # never let compression break a response
-        print(f"gzip after_request skipped: {exc}")
+        log.warning("gzip after_request skipped: %s", exc)
     return response
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -406,9 +406,9 @@ _jwks_client = None
 if SUPABASE_URL:
     try:
         _jwks_client = jwt.PyJWKClient(f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json")
-        print("JWKS client initialised for ES256 verification.")
+        log.info('JWKS client initialised for ES256 verification.')
     except Exception as e:
-        print(f"Warning: JWKS init failed ({e}). Falling back to HS256.")
+        log.error("JWKS init failed (%s). Falling back to HS256.", e)
 
 # ── Supabase REST helpers (bypasses broken supabase-py on Python 3.14) ──
 SUPABASE_REST_URL = f"{SUPABASE_URL}/rest/v1" if SUPABASE_URL else ""
@@ -421,9 +421,9 @@ SUPABASE_HEADERS = {
 
 supabase_ready = bool(SUPABASE_REST_URL and SUPABASE_HEADERS)
 if supabase_ready:
-    print("Supabase REST client configured.")
+    log.info('Supabase REST client configured.')
 else:
-    print("Warning: Supabase env vars missing. Progress features disabled.")
+    log.warning('Supabase env vars missing. Progress features disabled.')
 
 
 # ── Auth Middleware ──────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ try:
     redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
     redis_client.ping()  # Test connection
 except Exception as e:
-    print(f"Warning: Redis connection failed ({e}). Caching will be disabled.")
+    log.warning("Redis connection failed (%s). Caching will be disabled.", e)
     redis_client = None
 
 
@@ -560,9 +560,9 @@ if TRUSTED_PROXY_COUNT > 0:
         x_proto=TRUSTED_PROXY_COUNT,
         x_host=TRUSTED_PROXY_COUNT,
     )
-    print(f"Trusting {TRUSTED_PROXY_COUNT} proxy hop(s) for client IP resolution.")
+    log.info("Trusting %s proxy hop(s) for client IP resolution.", TRUSTED_PROXY_COUNT)
 else:
-    print("No trusted proxies; using the socket address for client IP.")
+    log.info('No trusted proxies; using the socket address for client IP.')
 
 def _rate_limit_key():
     """Rate-limit key: the authenticated user when there is one, else the client IP.
@@ -600,12 +600,12 @@ if Limiter is not None and RATE_LIMIT_ENABLED:
             strategy="fixed-window",
             headers_enabled=True,  # emit X-RateLimit-* so clients can back off
         )
-        print(f"Rate limiting enabled (storage: {'redis' if redis_client else 'memory'}).")
+        log.info("Rate limiting enabled (storage: %s).", 'redis' if redis_client else 'memory')
     except Exception as e:
-        print(f"Warning: rate limiter init failed ({e}); running unthrottled.")
+        log.error("rate limiter init failed (%s); running unthrottled.", e)
         limiter = None
 else:
-    print("Rate limiting disabled.")
+    log.warning('Rate limiting disabled.')
 
 
 def _rate_limit(limit_str):
@@ -783,7 +783,7 @@ def get_cached_transcript(video_id, from_lang):
     # Direct server-side fetch. On datacenter hosts (Render) YouTube may block
     # this and it will raise — that's expected now that the browser is the
     # primary caption source; the endpoint maps the failure to a clear message.
-    print(f"Attempting direct fetch for {video_id} in {from_lang}...")
+    log.info("Attempting direct fetch for %s in %s...", video_id, from_lang)
     direct_api = _install_fast_fetcher(_new_transcript_api())
     return attempt_fetch(direct_api)
 
@@ -1018,7 +1018,7 @@ def _read_processed_snippets_l2(video_id, from_lang):
             assigned_c, paragraphs_c = json.loads(cached)
             return assigned_c, paragraphs_c
     except Exception as e:
-        print(f"Redis transcript get error: {e}. Proceeding without L2 cache.")
+        log.error("Redis transcript get error: %s. Proceeding without L2 cache.", e)
     return None
 
 
@@ -1037,7 +1037,7 @@ def _write_processed_snippets_l2(video_id, from_lang, is_correct_lang, assigned,
                 json.dumps((assigned, paragraphs), ensure_ascii=False),
             )
         except Exception as e:
-            print(f"Redis transcript setex error: {e}. Continuing without L2 cache.")
+            log.error("Redis transcript setex error: %s. Continuing without L2 cache.", e)
 
 
 def _process_transcript_snippets(source_transcript, is_correct_lang, video_id, from_lang):
@@ -1096,7 +1096,7 @@ def _process_transcript_snippets(source_transcript, is_correct_lang, video_id, f
     # language (e.g. picking German shows English) even though the target-side
     # translation is derived correctly.
     if not is_correct_lang and paragraphs:
-        print(f"Manually translating {video_id} to {from_lang}")
+        log.info("Manually translating %s to %s", video_id, from_lang)
 
         # Build per-paragraph source-line lists in paragraph order so we can
         # translate paragraphs (for context) and recover aligned per-line text.
@@ -1261,7 +1261,7 @@ def _corroborate_client_snippets(video_id, from_lang, client_snippets):
             return False
         events = (tt.json() or {}).get("events") or []
     except Exception as e:
-        print(f"Caption corroboration failed for {video_id}: {type(e).__name__}: {e}")
+        log.error("Caption corroboration failed for %s: %s: %s", video_id, type(e).__name__, e)
         return False
 
     truth = _normalize_caption_lines(
@@ -1280,8 +1280,8 @@ def _corroborate_client_snippets(video_id, from_lang, client_snippets):
     matched = sum(1 for line in sample if line in truth_set)
     ratio = matched / len(sample)
     if ratio < _CORROBORATION_MIN_RATIO:
-        print(f"Caption corroboration mismatch for {video_id}: {ratio:.2f} of sampled "
-              f"lines matched YouTube's copy; not caching")
+        log.warning("Caption corroboration mismatch for %s: %.2f of sampled lines "
+                    "matched YouTube's copy; not caching", video_id, ratio)
         return False
     return True
 
@@ -1359,9 +1359,9 @@ def _promote_client_snippets_to_l2(video_id, from_lang, client_snippets, snippet
     try:
         if _corroborate_client_snippets(video_id, from_lang, client_snippets):
             _write_processed_snippets_l2(video_id, from_lang, True, snippets, paragraphs)
-            print(f"Cached corroborated client transcript for {video_id} ({from_lang})")
+            log.info("Cached corroborated client transcript for %s (%s)", video_id, from_lang)
     except Exception as e:
-        print(f"Cache promotion failed for {video_id}: {type(e).__name__}: {e}")
+        log.error("Cache promotion failed for %s: %s: %s", video_id, type(e).__name__, e)
 
 
 def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
@@ -1547,20 +1547,20 @@ def _deepl_request(texts, target_lang, source_lang="auto", extra_params=None):
         )
         if resp.status_code == 456:
             _DEEPL_COOLDOWN_UNTIL = time.time() + _DEEPL_COOLDOWN_SECONDS
-            print(f"DeepL quota exhausted (456); cooling down for {_DEEPL_COOLDOWN_SECONDS}s")
+            log.error("DeepL quota exhausted (456); cooling down for %ss", _DEEPL_COOLDOWN_SECONDS)
             return None
         if resp.status_code == 429:
             _DEEPL_COOLDOWN_UNTIL = time.time() + 60
-            print("DeepL rate-limited (429); 60s cooldown")
+            log.info('DeepL rate-limited (429); 60s cooldown')
             return None
         resp.raise_for_status()
         translations = (resp.json() or {}).get("translations") or []
         if len(translations) != len(texts):
-            print(f"DeepL returned {len(translations)} translations for {len(texts)} inputs; falling back")
+            log.warning("DeepL returned %s translations for %s inputs; falling back", len(translations), len(texts))
             return None
         return [t.get("text", "") for t in translations]
     except Exception as exc:
-        print(f"DeepL request failed ({exc}); falling back")
+        log.error("DeepL request failed (%s); falling back", exc)
         return None
 
 
@@ -1658,7 +1658,7 @@ def _deepl_translate_lines(lines, target_lang, source_lang="auto"):
         matches = _DEEPL_LINE_RE.findall(result[0] or "")
         if len(matches) == len(non_empty):
             return _rebuild([_xml_unescape(m).strip() for m in matches])
-        print(f"DeepL XML returned {len(matches)} segments for {len(non_empty)} lines; trying array mode")
+        log.info("DeepL XML returned %s segments for %s lines; trying array mode", len(matches), len(non_empty))
 
     # --- Strategy 2: multi-text array + paragraph context ---
     context = " ".join(non_empty)
@@ -1684,7 +1684,7 @@ def _ts_translate(engine, text, target_lang, source_lang, attempts=1):
     try:
         import translators as ts
     except Exception as exc:
-        print(f"translators import failed: {exc}; package disabled for this process")
+        log.error("translators import failed: %s; package disabled for this process", exc)
         _TRANSLATORS_IMPORT_FAILED = True
         return None
     src = "auto" if (source_lang or "auto") == "auto" else _ts_lang(source_lang)
@@ -1725,9 +1725,9 @@ def _bing_translate(text, target_lang, source_lang, attempts=3):
         msg = str(result)
         if "429" in msg or "Too Many Requests" in msg:
             _BING_COOLDOWN_UNTIL = time.time() + _BING_COOLDOWN_SECONDS
-            print(f"Bing rate-limited (429); cooling down for {_BING_COOLDOWN_SECONDS}s")
+            log.info("Bing rate-limited (429); cooling down for %ss", _BING_COOLDOWN_SECONDS)
         else:
-            print(f"Bing translate failed ({msg}); falling back")
+            log.error("Bing translate failed (%s); falling back", msg)
         return None
     return result
 
@@ -1754,7 +1754,7 @@ def _google_translate(text, target_lang, source_lang="auto"):
         translator = GoogleTranslator(source=src, target=tgt)
         return translator.translate(clean) or ""
     except Exception as exc:
-        print(f"Google translate failed: {exc}")
+        log.error("Google translate failed: %s", exc)
         return ""
 
 
@@ -1779,7 +1779,7 @@ def _translate_text(text, target_lang, source_lang="auto"):
         result = _ts_translate(engine, text, target_lang, source_lang, attempts=2)
         if result and not isinstance(result, Exception):
             return result
-    print("All quality engines failed; falling back to Google (may produce lower-quality output)")
+    log.error('All quality engines failed; falling back to Google (may produce lower-quality output)')
     return _google_translate(text, target_lang, source_lang)
 
 
@@ -1814,7 +1814,7 @@ def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
     try:
         translated = _translate_text(joined, target_lang, source_lang) or ""
     except Exception as exc:
-        print(f"Full-text translate failed: {exc}; falling back per-paragraph")
+        log.error("Full-text translate failed: %s; falling back per-paragraph", exc)
 
     chunks = _recover_chunks(translated, clean_paras) if translated else None
     if chunks is None:
@@ -1823,7 +1823,7 @@ def translate_paragraphs(paragraphs, target_lang, source_lang='auto'):
             try:
                 result[idx] = (_translate_text(clean_paras[idx], target_lang, source_lang) or clean_paras[idx]).strip()
             except Exception as exc:
-                print(f"Per-paragraph fallback failed for para {idx}: {exc}")
+                log.error("Per-paragraph fallback failed for para %s: %s", idx, exc)
                 result[idx] = clean_paras[idx]
         return result
 
@@ -2195,10 +2195,11 @@ def translate_with_alignment(paragraphs, lines_by_paragraph, target_lang, source
                     translated_paragraphs[p_idx] = para_text
                     translated_lines[p_idx] = lines
                 except Exception as exc:
-                    print(f"Paragraph translation task failed: {exc}")
+                    log.error("Paragraph translation task failed: %s", exc)
         except FuturesTimeoutError:
             done = sum(1 for f in futures if f.done())
-            print(f"translate_with_alignment hit {deadline:.0f}s cap; {done}/{n_paras} paragraphs done, rest left empty")
+            log.warning("translate_with_alignment hit %.0fs cap; %s/%s paragraphs done, "
+                        "rest left empty", deadline, done, n_paras)
     finally:
         # Don't wait on in-flight tasks; cancel anything not yet started.
         pool.shutdown(wait=False, cancel_futures=True)
@@ -2241,7 +2242,7 @@ def _validate_client_snippets(raw):
     if not isinstance(raw, list) or not raw:
         return None
     if len(raw) > _MAX_CLIENT_SNIPPETS:
-        print(f"Rejecting client snippets: {len(raw)} exceeds cap {_MAX_CLIENT_SNIPPETS}")
+        log.info("Rejecting client snippets: %s exceeds cap %s", len(raw), _MAX_CLIENT_SNIPPETS)
         return None
 
     def _num(v):
@@ -2301,8 +2302,7 @@ def get_transcript():
 
     try:
         if client_snippets:
-            print(f"Using client-fetched snippets for {video_id} ({len(client_snippets)} lines, "
-                  f"correct_lang={client_is_correct_lang})")
+            log.info("Using client-fetched snippets for %s (%s lines, correct_lang=%s)", video_id, len(client_snippets), client_is_correct_lang)
             snippets, paragraphs = get_processed_snippets_from_client(
                 video_id, from_lang, client_snippets, client_is_correct_lang
             )
@@ -2312,7 +2312,7 @@ def get_transcript():
         # The transcript needed manual translation into from_lang but the
         # translator no-op'd (outage / cooldown). Not cached, so a retry can
         # succeed — surface a retryable message rather than a hard error.
-        print(f"Transcript translation unavailable for {video_id}: {e}")
+        log.warning("Transcript translation unavailable for %s: %s", video_id, e)
         return jsonify({
             "error": "We couldn't finish translating this video's subtitles right now. "
                      "Please try again in a moment.",
@@ -2325,7 +2325,7 @@ def get_transcript():
         # video is unavailable.
         msg = str(e)
         low = msg.lower()
-        print(f"Error fetching transcript for {video_id}: {type(e).__name__}: {msg}")
+        log.error("Error fetching transcript for %s: %s: %s", video_id, type(e).__name__, msg)
 
         # Last resort before erroring: serve a previously cached transcript for
         # this exact (video, language). The live path just failed, so a cached
@@ -2335,7 +2335,7 @@ def get_transcript():
         if stale is not None:
             stale_snippets, stale_paragraphs = stale
             if stale_snippets:
-                print(f"Serving cached transcript for {video_id} after live fetch failed")
+                log.error("Serving cached transcript for %s after live fetch failed", video_id)
                 return jsonify({
                     "video_id": video_id,
                     "snippets": stale_snippets,
@@ -2420,7 +2420,7 @@ def get_caption_tracks():
     except Exception as e:
         msg = str(e)
         low = msg.lower()
-        print(f"Error listing caption tracks for {video_id}: {type(e).__name__}: {msg}")
+        log.error("Error listing caption tracks for %s: %s: %s", video_id, type(e).__name__, msg)
         # Same status mapping as /api/transcript so the client can treat both
         # paths' errors identically.
         if "blocked" in low or ("ip" in low and "block" in low):
@@ -2517,7 +2517,7 @@ def translate_text():
                             entry = json.loads(raw)  # {"p": <str>, "l": [<str>...]}
                             cached_by_idx[i] = entry
                 except Exception as e:
-                    print(f"Redis mget error: {e}. Proceeding without cache.")
+                    log.error("Redis mget error: %s. Proceeding without cache.", e)
 
             miss_indices = [i for i in range(n) if i not in cached_by_idx]
             all_hit = not miss_indices
@@ -2559,7 +2559,7 @@ def translate_text():
                             pipe.setex(k, REDIS_TTL_SECONDS, v)
                         pipe.execute()
                     except Exception as e:
-                        print(f"Redis per-paragraph setex error: {e}. Continuing without cache.")
+                        log.error("Redis per-paragraph setex error: %s. Continuing without cache.", e)
 
             payload = {
                 "translated_paragraphs": translated_paragraphs,
@@ -2577,7 +2577,7 @@ def translate_text():
             try:
                 cached = redis_client.get(cache_key)
             except Exception as e:
-                print(f"Redis get error: {e}. Proceeding without cache.")
+                log.error("Redis get error: %s. Proceeding without cache.", e)
 
         if cached:
             payload = json.loads(cached)
@@ -2608,13 +2608,13 @@ def translate_text():
             try:
                 redis_client.setex(cache_key, REDIS_TTL_SECONDS, json.dumps(payload, ensure_ascii=False))
             except Exception as e:
-                print(f"Redis setex error: {e}. Continuing without cache.")
+                log.error("Redis setex error: %s. Continuing without cache.", e)
 
         payload["cache_hit"] = False
         return jsonify(payload)
 
     except Exception as e:
-        print(f"Translate Error: {e}")
+        log.error("Translate Error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 # ── Progress Endpoints ───────────────────────────────────────────────────
@@ -2727,7 +2727,7 @@ def db_keepalive():
         _sb_get("videos", {"select": "id", "limit": "1"})
         return jsonify({"ok": True, "pinged_at": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
-        print(f"/api/db-keepalive error: {e}")
+        log.error("/api/db-keepalive error: %s", e)
         # Surfaced as non-200 so a failing keep-alive is visible to the caller's
         # run history rather than silently passing.
         return jsonify({"ok": False, "error": "Database ping failed"}), 502
@@ -2748,7 +2748,7 @@ def get_all_progress():
         })
         return jsonify({"progress": rows})
     except Exception as e:
-        print(f"GET /api/progress error: {e}")
+        log.error("GET /api/progress error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -2823,7 +2823,7 @@ def upsert_progress():
 
         return jsonify({"progress": result[0] if result else None})
     except Exception as e:
-        print(f"POST /api/progress/upsert error: {e}")
+        log.error("POST /api/progress/upsert error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -2859,7 +2859,7 @@ def get_video_progress(youtube_id):
         rows = _sb_get("user_progress", params)
         return jsonify({"progress": rows[0] if rows else None})
     except Exception as e:
-        print(f"GET /api/progress/{youtube_id} error: {e}")
+        log.error("GET /api/progress/%s error: %s", youtube_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -2878,7 +2878,7 @@ def get_profile():
         })
         return jsonify({"profile": rows[0] if rows else None})
     except Exception as e:
-        print(f"GET /api/profile error: {e}")
+        log.error("GET /api/profile error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -2919,7 +2919,7 @@ def create_or_update_profile():
 
         return jsonify({"profile": result[0] if result else None})
     except Exception as e:
-        print(f"POST /api/profile error: {e}")
+        log.error("POST /api/profile error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -2945,7 +2945,7 @@ def update_profile_name():
             return jsonify({"error": "Profile not found. Please complete signup first."}), 404
         return jsonify({"profile": result[0] if result else None})
     except Exception as e:
-        print(f"PATCH /api/profile/name error: {e}")
+        log.error("PATCH /api/profile/name error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -2998,7 +2998,7 @@ def create_class():
         result = _sb_post("classes", row)
         return jsonify({"class": result[0] if result else None}), 201
     except Exception as e:
-        print(f"POST /api/classes error: {e}")
+        log.error("POST /api/classes error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3041,7 +3041,7 @@ def get_classes():
                     classes.append(cls)
             return jsonify({"classes": classes, "role": "student"})
     except Exception as e:
-        print(f"GET /api/classes error: {e}")
+        log.error("GET /api/classes error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3092,7 +3092,7 @@ def get_class_detail(class_id):
             "is_teacher": is_teacher,
         })
     except Exception as e:
-        print(f"GET /api/classes/{class_id} error: {e}")
+        log.error("GET /api/classes/%s error: %s", class_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3142,7 +3142,7 @@ def join_class():
         _sb_post("student_classes", row)
         return jsonify({"message": f"Successfully joined {cls['class_name']}", "class_id": cls["class_id"]}), 200
     except Exception as e:
-        print(f"POST /api/classes/join error: {e}")
+        log.error("POST /api/classes/join error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3167,7 +3167,7 @@ def delete_class(class_id):
         _sb_delete("classes", {"class_id": f"eq.{class_id}"})
         return jsonify({"message": "Class deleted successfully"})
     except Exception as e:
-        print(f"DELETE /api/classes/{class_id} error: {e}")
+        log.error("DELETE /api/classes/%s error: %s", class_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3197,7 +3197,7 @@ def remove_student(class_id, student_id):
         })
         return jsonify({"message": "Student removed from class"})
     except Exception as e:
-        print(f"DELETE /api/classes/{class_id}/students/{student_id} error: {e}")
+        log.error("DELETE /api/classes/%s/students/%s error: %s", class_id, student_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3359,7 +3359,7 @@ def create_assignment():
 
         return jsonify({"assignment": assignment[0]}), 201
     except Exception as e:
-        print(f"POST /api/assignments error: {e}")
+        log.error("POST /api/assignments error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3473,7 +3473,7 @@ def list_assignments():
             result.append(a)
         return jsonify({"assignments": result, "role": "student"})
     except Exception as e:
-        print(f"GET /api/assignments error: {e}")
+        log.error("GET /api/assignments error: %s", e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3531,7 +3531,7 @@ def get_assignment_detail(assignment_id):
         assignment["progress"] = prog[0] if prog else None
         return jsonify({"assignment": assignment, "is_teacher": False})
     except Exception as e:
-        print(f"GET /api/assignments/{assignment_id} error: {e}")
+        log.error("GET /api/assignments/%s error: %s", assignment_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3555,7 +3555,7 @@ def delete_assignment(assignment_id):
         _sb_delete("assignments", {"assignment_id": f"eq.{assignment_id}"})
         return jsonify({"message": "Assignment deleted"})
     except Exception as e:
-        print(f"DELETE /api/assignments/{assignment_id} error: {e}")
+        log.error("DELETE /api/assignments/%s error: %s", assignment_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3632,7 +3632,7 @@ def upsert_assignment_progress(assignment_id):
         )
         return jsonify({"progress": result[0] if result else None})
     except Exception as e:
-        print(f"POST /api/assignments/{assignment_id}/progress error: {e}")
+        log.error("POST /api/assignments/%s/progress error: %s", assignment_id, e)
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
@@ -3685,7 +3685,7 @@ def clear_translation_cache():
             "entries_deleted": total_deleted,
         })
     except Exception as e:
-        print(f"Clear cache error: {e}")
+        log.error("Clear cache error: %s", e)
         return jsonify({"error": "Failed to clear cache"}), 500
 
 

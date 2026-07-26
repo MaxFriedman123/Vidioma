@@ -35,13 +35,16 @@ Vidioma is an interactive language practice app for YouTube videos. You paste a 
 ```text
 Vidioma/
   backend/
-    app.py
-    manual_api_smoke_test.py
+    app.py                     the whole Flask API
+    db/                        SQL to run in the Supabase editor (schema + RLS)
+    smoke_api.py               manual latency check (not part of the suite)
+    test_*.py                  pytest suite
     requirements.txt
   frontend/
     package.json
+    public/                    static assets + app icons
+    scripts/generate-icons.sh  regenerates the icons from the SVG masters
     src/
-    public/
   cloudflare-worker/           caption-list relay (see its README)
   cloudflare-worker-keepalive/ Supabase anti-pause cron (see its README)
   docs/
@@ -298,7 +301,7 @@ mean the project was **not** touched. Rate-limited to 60 requests per hour.
 
 ## Smoke Test Script
 
-`backend/manual_api_smoke_test.py` is a manual latency/smoke check for:
+`backend/smoke_api.py` is a manual latency/smoke check for:
 
 - `POST /api/transcript`
 - `POST /api/translate`
@@ -307,7 +310,7 @@ Run it after the backend is running:
 
 ```powershell
 cd backend
-python manual_api_smoke_test.py
+python smoke_api.py
 ```
 
 ## Keeping Supabase Awake
@@ -371,4 +374,4 @@ server, not part of the automated suite.
 
 ## License
 
-No license file is currently included.
+[MIT](LICENSE).
