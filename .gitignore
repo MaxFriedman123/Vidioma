@@ -1,2 +1,11 @@
 # Redis dump (local dev cache snapshot)
 dump.rdb
+
+# macOS finder metadata
+.DS_Store
+
+# Local environment files. Each subproject also ignores its own, but keep a
+# root-level guard so a stray .env anywhere is never committed.
+.env
+.env.local
+.env.*.local
