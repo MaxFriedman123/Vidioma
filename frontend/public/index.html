@@ -2,14 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" sizes="16x16 24x24 32x32 64x64" />
+    <!-- Browsers that support it prefer the SVG, which stays sharp at any size. -->
+    <link rel="icon" href="%PUBLIC_URL%/logo.svg" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#2b2d35" />
     <meta
       name="description"
       content="Vidioma helps you practice listening and translation with YouTube subtitles."
     />
+    <!-- iOS home-screen icon. It applies its own rounded mask and does NOT honour
+         transparency, so this points at the opaque 192px tile. -->
     <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <meta name="apple-mobile-web-app-title" content="Vidioma" />
     <!--
       manifest.json provides metadata used when your web app is installed on a
       user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
