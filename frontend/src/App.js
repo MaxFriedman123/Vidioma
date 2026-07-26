@@ -188,6 +188,10 @@ function App() {
   // cursor is near — prev, current, or next — independently.
   const [cursorViewport, setCursorViewport] = useState({ x: -9999, y: -9999 });
   const revealRef = useRef(null);
+  // Reveals the whole translation instead of a pointer-following spotlight. The
+  // flashlight is driven by cursor/touch position, so it is the one part of the
+  // app with no keyboard or screen-reader path; this toggle is that path.
+  const [revealAll, setRevealAll] = useState(false);
   const prevLineWrapRef = useRef(null);
   const currentLineWrapRef = useRef(null);
   const nextLineWrapRef = useRef(null);
@@ -440,6 +444,8 @@ function App() {
     setShowInput(false);
     setUserInput('');
     setAnswered(false);
+    // Collapse the reveal so a new line doesn't start with its answer showing.
+    setRevealAll(false);
     setIsError(false);
     setIsFinished(false);
     setPlayer(null);
@@ -688,6 +694,8 @@ function App() {
     setShowInput(false);
     setUserInput('');
     setAnswered(false);
+    // Collapse the reveal so a new line doesn't start with its answer showing.
+    setRevealAll(false);
     setIsError(false);
     setLoadError(null);
     // Bumping the session above means the in-flight transcript request's finally
@@ -900,6 +908,7 @@ function App() {
               setShowInput(false);
               setUserInput('');
               setAnswered(false);
+              setRevealAll(false);
             }
             return; // ignore the forward seek entirely
           }
@@ -1152,6 +1161,11 @@ function App() {
   // lights only the next line, etc. Returns undefined when the ref isn't
   // mounted yet (mask omitted -> layer hidden until first paint).
   const buildRevealMask = (wrapRef) => {
+    // Keyboard/assistive equivalent of sweeping the flashlight: when the reveal
+    // is toggled on, drop the mask entirely so the text is simply visible. The
+    // spotlight is a pointer-position effect, so without this the translations
+    // were unreachable for anyone not using a mouse or touchscreen.
+    if (revealAll) return undefined;
     const el = wrapRef.current;
     if (!el) return undefined;
     const rect = el.getBoundingClientRect();
@@ -1445,6 +1459,18 @@ function App() {
                   {/* Translation display — mirrors the source scroll with prev/current/next
                       lines. The full paragraph is translated for context, then split per
                       source line for display. */}
+                  {/* Keyboard-reachable equivalent of the flashlight sweep. Placed
+                      before the reveal area so tab order hits it first. */}
+                  {!translationPending && !translationFailed && (
+                    <button
+                      type="button"
+                      className="reveal-toggle"
+                      onClick={() => setRevealAll((v) => !v)}
+                      aria-pressed={revealAll}
+                    >
+                      {revealAll ? 'Hide translation' : 'Show translation'}
+                    </button>
+                  )}
                   <div
                     className="reveal-container"
                     ref={revealRef}
@@ -1566,7 +1592,10 @@ function App() {
                           )}
                         </button>
                       </div>
-                      <p className="hint">
+                      {/* aria-live so a screen reader announces the grading result.
+                          Without it, "Correct!" / "Not quite!" changed silently and a
+                          non-sighted user got no feedback at all on their answer. */}
+                      <p className="hint" role="status" aria-live="polite">
                         {answered
                           ? "Correct! Press Enter or tap arrow to continue."
                           : translationPending

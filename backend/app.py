@@ -34,6 +34,64 @@ from deep_translator import GoogleTranslator
 from functools import lru_cache, wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import jwt
+import logging
+import time
+import uuid as uuid_mod
+
+
+# ── Logging ────────────────────────────────────────────────────────────────
+# The app previously used bare print(), which gives no level, no timestamp, and
+# no way to filter. That fails the "it broke at 2am, can I find out why?" test:
+# on a hosted log stream an authorization denial looked identical to a cache miss.
+#
+# Format is deliberately parseable (fixed leading fields) so a log search can
+# grep a level or an event name out of the hosting provider's stream without any
+# extra infrastructure.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+log = logging.getLogger("vidioma")
+
+# Security-relevant events go to their own logger so authentication and
+# authorization activity can be filtered out of ordinary application noise
+# (see ARCC guidance on application-level security event logging). Anything
+# logged here is metadata only: user ids, endpoints, and outcomes. Never tokens,
+# never request bodies.
+security_log = logging.getLogger("vidioma.security")
+
+
+def _client_ip():
+    """Best-effort client address for security logs. Correct behind the proxy
+    because ProxyFix (see TRUSTED_PROXY_COUNT) has already rewritten
+    REMOTE_ADDR from the trusted hop of X-Forwarded-For."""
+    try:
+        return request.remote_addr or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def log_security_event(event, outcome, user_id=None, detail=None):
+    """Record an authentication/authorization event.
+
+    `event` is a stable short name (auth.token_invalid, authz.denied, ...) so
+    events can be counted and alerted on. `outcome` is success|failure|denied.
+    Deliberately records the user id rather than any credential, and never the
+    token or request body, so the log itself can't become a credential leak.
+    """
+    parts = [f"event={event}", f"outcome={outcome}", f"ip={_client_ip()}"]
+    if user_id:
+        parts.append(f"user={user_id}")
+    try:
+        parts.append(f"path={request.method} {request.path}")
+        rid = getattr(g, "request_id", None)
+        if rid:
+            parts.append(f"request_id={rid}")
+    except Exception:
+        pass
+    if detail:
+        parts.append(f"detail={detail}")
+    security_log.warning(" ".join(parts))
 
 
 def _build_pooled_session(pool_maxsize=16):
@@ -244,6 +302,52 @@ import gzip as _gzip
 _GZIP_MIN_BYTES = 1024
 
 
+@app.before_request
+def _resolve_rate_limit_identity():
+    """Verify the bearer token, if any, purely to pick a rate-limit bucket.
+
+    Runs before the limiter's key function (see _rate_limit_key), which flask
+    evaluates ahead of the view's own auth decorator. This does NOT authorize
+    anything: it only sets g.rate_limit_identity, and every endpoint still does
+    its own require_auth/optional_auth exactly as before. A bad token silently
+    means "no identity", i.e. fall back to limiting by address.
+    """
+    g.rate_limit_identity = None
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return
+    try:
+        payload = _verify_token(auth_header.split(" ", 1)[1])
+        sub = payload.get("sub")
+        if isinstance(sub, str) and sub:
+            g.rate_limit_identity = sub
+    except Exception:
+        # Not a usable identity. Deliberately silent: require_auth logs the
+        # security event for endpoints that actually demand a valid token, and
+        # logging here too would double-count every expired-token request.
+        pass
+
+
+@app.before_request
+def _assign_request_id():
+    """Tag every request so a security event, an error, and the response a user
+    saw can be tied together. Echoed back in X-Request-Id, so a user reporting a
+    problem can quote an id that actually appears in the logs."""
+    incoming = request.headers.get("X-Request-Id", "")
+    # Only accept a caller-supplied id if it looks like an id, so it can't be
+    # used to inject newlines or arbitrary text into the log stream.
+    g.request_id = incoming if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", incoming or "") \
+        else uuid_mod.uuid4().hex[:16]
+
+
+@app.after_request
+def _attach_request_id(response):
+    rid = getattr(g, "request_id", None)
+    if rid:
+        response.headers["X-Request-Id"] = rid
+    return response
+
+
 @app.after_request
 def _gzip_response(response):
     try:
@@ -273,6 +377,17 @@ def _gzip_response(response):
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 REDIS_TTL_SECONDS = int(os.environ.get("REDIS_TTL_SECONDS", "86400"))
+
+# Cloudflare Worker caption relay (cloudflare-worker/). Same URL the frontend
+# uses. The server needs it to independently corroborate browser-supplied
+# captions before caching them (see _corroborate_client_snippets): the relay
+# egresses from Cloudflare, which YouTube does not IP-block, so it is the only
+# second opinion actually available from this host. Unset means no corroboration
+# is possible, so nothing gets promoted into the shared cache.
+CAPTION_RELAY_URL = os.environ.get("CAPTION_RELAY_URL", "").strip().rstrip("/")
+# (connect, read). Corroboration happens on the request path, so it must fail
+# fast: it only enables a cache write, and the response is already computed.
+CORROBORATION_TIMEOUT = (3, 8)
 
 DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "").strip()
 DEEPL_API_URL = (
@@ -342,6 +457,7 @@ def require_auth(f):
     def decorated(*args, **kwargs):
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
+            log_security_event("auth.header_missing", "failure")
             return jsonify({"error": "Missing or malformed Authorization header"}), 401
 
         token = auth_header.split(" ", 1)[1]
@@ -350,14 +466,19 @@ def require_auth(f):
             payload = _verify_token(token)
             g.user_id = payload["sub"]  # Supabase stores user UUID in 'sub'
         except jwt.ExpiredSignatureError:
+            log_security_event("auth.token_expired", "failure")
             return jsonify({"error": "Token has expired"}), 401
         except jwt.InvalidTokenError:
+            # A rejected signature is the signal worth alerting on: it means a
+            # token was forged or tampered with, not merely stale.
+            log_security_event("auth.token_invalid", "failure")
             return jsonify({"error": "Invalid token"}), 401
         except Exception as e:
             # JWKS lookup failures (unknown/absent kid, transient JWKS outage)
             # raise PyJWKClientError, which is NOT an InvalidTokenError. Treat
             # them as auth failures (401) rather than leaking a 500.
-            print(f"Auth verification error: {e}")
+            log_security_event("auth.verify_error", "failure", detail=type(e).__name__)
+            log.warning("Auth verification error: %s", e)
             return jsonify({"error": "Could not verify authentication token"}), 401
 
         return f(*args, **kwargs)
@@ -443,13 +564,36 @@ if TRUSTED_PROXY_COUNT > 0:
 else:
     print("No trusted proxies; using the socket address for client IP.")
 
+def _rate_limit_key():
+    """Rate-limit key: the authenticated user when there is one, else the client IP.
+
+    A whole classroom typically shares one public IP, so keying purely on address
+    means ~30 students share one student's worth of budget and throttle each
+    other. A signed-in user gets their own bucket regardless of the network they
+    are on, which is both fairer to the class and a tighter limit on the
+    individual.
+
+    The identity comes from `g.rate_limit_identity`, resolved in
+    _resolve_rate_limit_identity during before_request. It has to be resolved
+    there rather than read from g.user_id: flask-limiter computes this key before
+    the view's own auth decorator has run, so g.user_id is not set yet on the hot
+    endpoints. It is a verified JWT subject either way, so it cannot be spoofed to
+    mint extra buckets, and anything unverified falls back to the address, which
+    keeps anonymous traffic bounded exactly as before.
+    """
+    identity = getattr(g, "rate_limit_identity", None)
+    if identity:
+        return f"user:{identity}"
+    return f"ip:{get_remote_address()}"
+
+
 limiter = None
 if Limiter is not None and RATE_LIMIT_ENABLED:
     try:
         # storage_uri="" (omitted) -> in-memory; pass Redis when available.
         _limiter_storage = REDIS_URL if redis_client is not None else "memory://"
         limiter = Limiter(
-            key_func=get_remote_address,
+            key_func=_rate_limit_key,
             app=app,
             default_limits=[RATE_LIMIT_DEFAULT],
             storage_uri=_limiter_storage,
@@ -484,6 +628,61 @@ def _ratelimit_exceeded(e):
 @app.route('/')
 def home():
     return "Vidioma Backend is Awake - Proxies Active!"
+
+
+@app.route('/health')
+@_rate_limit("120 per hour")
+def health():
+    """Dependency health for uptime monitoring and on-call triage.
+
+    Answers "which piece is broken?" without needing log access. Reports only
+    whether each dependency is configured and reachable, never URLs, keys, or
+    versions, since this endpoint is unauthenticated (an uptime monitor has no
+    credentials) and that detail would be reconnaissance.
+
+    Always returns 200 when the app itself can serve traffic. A degraded
+    dependency is reported in the body rather than as a non-200, so an optional
+    subsystem being down (Redis is a cache; Supabase only powers accounts) does
+    not make a load balancer pull a working instance out of service.
+    """
+    checks = {}
+
+    if redis_client is None:
+        checks["redis"] = "not_configured"
+    else:
+        try:
+            redis_client.ping()
+            checks["redis"] = "ok"
+        except Exception:
+            checks["redis"] = "unreachable"
+
+    if not supabase_ready:
+        checks["supabase"] = "not_configured"
+    else:
+        try:
+            _sb_get("videos", {"select": "id", "limit": "1"})
+            checks["supabase"] = "ok"
+        except Exception:
+            checks["supabase"] = "unreachable"
+
+    if not DEEPL_API_KEY:
+        checks["translator"] = "fallback_only"
+    elif time.time() < _DEEPL_COOLDOWN_UNTIL:
+        # Quota exhausted (or a hard error) put DeepL in cooldown, so translation
+        # is silently running on the lower-quality scraped engines. Surfacing it
+        # here is the difference between noticing and finding out from a user.
+        checks["translator"] = "deepl_cooling_down"
+    else:
+        checks["translator"] = "deepl"
+    checks["caption_relay"] = "configured" if CAPTION_RELAY_URL else "not_configured"
+    checks["rate_limiting"] = "on" if limiter is not None else "off"
+
+    degraded = [k for k, v in checks.items() if v == "unreachable"]
+    return jsonify({
+        "status": "degraded" if degraded else "ok",
+        "degraded": degraded,
+        "checks": checks,
+    })
 
 # Utility function to extract video ID from various YouTube URL formats
 # Handles watch?v=, youtu.be/, /embed/, /v/, /shorts/, and bare 11-char IDs,
@@ -1006,6 +1205,99 @@ def get_cached_processed_snippets(video_id, from_lang):
     return assigned, paragraphs
 
 
+# How much of the client's text must match YouTube's own copy for the batch to be
+# treated as genuine. Not 1.0: the browser and the relay can legitimately land on
+# different-but-equivalent tracks (a regional variant, or auto-translate applied at
+# a slightly different revision), and caption text itself gets edited over time.
+# High enough that substituted content can't pass.
+_CORROBORATION_MIN_RATIO = 0.85
+# Comparing every line is wasteful on a long video; a sample from across the
+# transcript is enough to detect substitution, which changes the text throughout.
+_CORROBORATION_SAMPLE = 25
+# Small, fixed pool for background cache promotion. Bounded so a burst of
+# first-views can't spawn unbounded threads; if it is saturated the extra
+# promotions just queue, and a dropped promotion only costs a later cache miss.
+_CACHE_PROMOTION_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cache-promo")
+
+
+def _corroborate_client_snippets(video_id, from_lang, client_snippets):
+    """Check browser-supplied snippets against YouTube's own copy of the track.
+
+    Returns True only when an INDEPENDENT fetch agrees with what the client sent,
+    which is what makes it safe to promote client data into the shared L2 cache
+    (see get_processed_snippets_from_client). Any doubt returns False: a failed
+    corroboration must degrade to "don't cache", never to "cache anyway".
+
+    The independent copy comes from CAPTION_RELAY_URL when configured. That relay
+    egresses from Cloudflare, which YouTube does not IP-block, so unlike a direct
+    server fetch it actually works from our host. Without it there is no
+    trustworthy second opinion available, so nothing is cached.
+    """
+    if not CAPTION_RELAY_URL or not client_snippets:
+        return False
+
+    try:
+        resp = _HTTP_SESSION.post(
+            CAPTION_RELAY_URL,
+            json={"url": video_id, "from_lang": from_lang},
+            timeout=CORROBORATION_TIMEOUT,
+        )
+        if not resp.ok:
+            return False
+        track_url = (resp.json() or {}).get("url")
+        # The relay reports whether the track it picked is actually in from_lang.
+        # If it isn't, the client's is_correct_lang claim is unverified, so the
+        # batch must not be cached under this language's key.
+        if not track_url or not (resp.json() or {}).get("is_correct_lang"):
+            return False
+
+        # Fetch YouTube's copy. The timedtext URL is not IP-locked, so this works
+        # server-side even though the transcript API's own fetch does not.
+        tt = _HTTP_SESSION.get(
+            re.sub(r"&fmt=[^&]*", "", track_url) + "&fmt=json3",
+            timeout=CORROBORATION_TIMEOUT,
+        )
+        if not tt.ok:
+            return False
+        events = (tt.json() or {}).get("events") or []
+    except Exception as e:
+        print(f"Caption corroboration failed for {video_id}: {type(e).__name__}: {e}")
+        return False
+
+    truth = _normalize_caption_lines(
+        "".join(s.get("utf8", "") for s in (ev.get("segs") or []))
+        for ev in events if isinstance(ev, dict) and ev.get("segs")
+    )
+    claimed = _normalize_caption_lines(s.get("text", "") for s in client_snippets)
+    if not truth or not claimed:
+        return False
+
+    # Sample evenly across the claimed lines so a batch that is genuine at the
+    # start and substituted later still fails.
+    step = max(1, len(claimed) // _CORROBORATION_SAMPLE)
+    sample = claimed[::step][:_CORROBORATION_SAMPLE]
+    truth_set = set(truth)
+    matched = sum(1 for line in sample if line in truth_set)
+    ratio = matched / len(sample)
+    if ratio < _CORROBORATION_MIN_RATIO:
+        print(f"Caption corroboration mismatch for {video_id}: {ratio:.2f} of sampled "
+              f"lines matched YouTube's copy; not caching")
+        return False
+    return True
+
+
+def _normalize_caption_lines(texts):
+    """Collapse caption text to a comparable form: whitespace-normalized,
+    lowercased, empties dropped. Comparison has to survive cosmetic differences
+    (line wrapping, stray spacing) without accepting different words."""
+    out = []
+    for t in texts:
+        norm = " ".join((t or "").split()).lower()
+        if norm:
+            out.append(norm)
+    return out
+
+
 def get_processed_snippets_from_client(video_id, from_lang, client_snippets, client_is_correct_lang):
     """
     Process transcript snippets that the USER'S BROWSER already fetched from
@@ -1021,25 +1313,55 @@ def get_processed_snippets_from_client(video_id, from_lang, client_snippets, cli
     `from_lang` (native, regional, or YouTube auto-translated), False when it
     could only get another language and we must translate here.
 
-    Caching: L2 READ only. A browser fetch for a video the SERVER already
-    processed is a free hit. But this path deliberately NEVER WRITES the L2
-    cache, because the endpoint is unauthenticated and both the content
-    (client_snippets) and the client_is_correct_lang flag are attacker-
-    controllable — writing them to the shared (video_id, from_lang) key that the
-    trusted server path also reads would let one caller poison the transcript
-    (or its language) served to every other user. Only the server fetch, whose
-    content comes from YouTube directly, is allowed to populate L2. The cost of
-    not caching here is just re-running the cheap grouping on a later client
-    request; the expensive part (the YouTube fetch) was already done in the
-    browser, and the translation path is never L2-cached on either side anyway.
+    Caching: L2 read, and L2 write ONLY via the corroborated path below.
+
+    The write is gated because this endpoint is unauthenticated and both the
+    content (client_snippets) and the client_is_correct_lang flag are
+    caller-controlled. Writing them straight to the shared (video_id, from_lang)
+    key that everyone reads would let one caller poison the transcript, or its
+    language, for every other user. Historically the write was simply skipped,
+    which left the L2 cache with no reachable writer at all in production (its
+    only other writer is the server fetch, which YouTube IP-blocks on our host),
+    so every request re-fetched from YouTube and a YouTube-side outage took the
+    whole app down with nothing cached to fall back on.
+
+    So instead of trusting the client, the snippets are corroborated against
+    YouTube independently (see _corroborate_client_snippets) before being cached.
+    An uncorroborated batch is still SERVED to the caller who supplied it, it
+    just never becomes a shared cache entry.
     """
     cached = _read_processed_snippets_l2(video_id, from_lang)
     if cached is not None:
         return cached
 
-    return _process_transcript_snippets(
+    snippets, paragraphs = _process_transcript_snippets(
         client_snippets, client_is_correct_lang, video_id, from_lang
     )
+
+    # Only the already-in-language path is cacheable, matching the server path's
+    # rule in _write_processed_snippets_l2: a manual translation is
+    # provider-state-dependent and must not be pinned for the whole TTL.
+    #
+    # Corroboration costs two network calls, so it runs in the BACKGROUND. The
+    # caller's response is already computed and must not wait on work whose only
+    # purpose is to populate a cache for later requests.
+    if client_is_correct_lang and snippets:
+        _CACHE_PROMOTION_POOL.submit(
+            _promote_client_snippets_to_l2,
+            video_id, from_lang, client_snippets, snippets, paragraphs,
+        )
+
+    return snippets, paragraphs
+
+
+def _promote_client_snippets_to_l2(video_id, from_lang, client_snippets, snippets, paragraphs):
+    """Corroborate, then cache. Runs off the request path; never raises into it."""
+    try:
+        if _corroborate_client_snippets(video_id, from_lang, client_snippets):
+            _write_processed_snippets_l2(video_id, from_lang, True, snippets, paragraphs)
+            print(f"Cached corroborated client transcript for {video_id} ({from_lang})")
+    except Exception as e:
+        print(f"Cache promotion failed for {video_id}: {type(e).__name__}: {e}")
 
 
 def generate_cache_key(from_lang, to_lang, paragraphs, lines_by_paragraph=None):
@@ -2005,6 +2327,22 @@ def get_transcript():
         low = msg.lower()
         print(f"Error fetching transcript for {video_id}: {type(e).__name__}: {msg}")
 
+        # Last resort before erroring: serve a previously cached transcript for
+        # this exact (video, language). The live path just failed, so a cached
+        # copy is strictly better than an error page, and it means a YouTube-side
+        # outage only affects videos nobody has watched yet.
+        stale = _read_processed_snippets_l2(video_id, from_lang)
+        if stale is not None:
+            stale_snippets, stale_paragraphs = stale
+            if stale_snippets:
+                print(f"Serving cached transcript for {video_id} after live fetch failed")
+                return jsonify({
+                    "video_id": video_id,
+                    "snippets": stale_snippets,
+                    "paragraphs": stale_paragraphs,
+                    "from_lang": from_lang,
+                })
+
         # Parenthesized so precedence is explicit (and binds tighter than or).
         if "blocked" in low or ("ip" in low and "block" in low):
             return jsonify({
@@ -2634,6 +2972,7 @@ def create_class():
     # Verify user is a teacher
     profile = _sb_get("user_profiles", {"select": "user_role", "user_id": f"eq.{g.user_id}"})
     if not profile or profile[0].get("user_role") != "teacher":
+        log_security_event("authz.denied.class_create", "denied", g.user_id)
         return jsonify({"error": "Only teachers can create classes"}), 403
 
     data = request.get_json()
@@ -2733,6 +3072,7 @@ def get_class_detail(class_id):
                 "student_id": f"eq.{g.user_id}",
             })
             if not enrollment:
+                log_security_event("authz.denied.resource_access", "denied", g.user_id)
                 return jsonify({"error": "Access denied"}), 403
             # The class code is the enrollment secret — only the teacher who owns
             # the class should ever see it. `select=*` above pulls it in, so drop
@@ -2766,6 +3106,7 @@ def join_class():
     # Verify user is a student
     profile = _sb_get("user_profiles", {"select": "user_role", "user_id": f"eq.{g.user_id}"})
     if not profile or profile[0].get("user_role") != "student":
+        log_security_event("authz.denied.class_join", "denied", g.user_id)
         return jsonify({"error": "Only students can join classes"}), 403
 
     data = request.get_json()
@@ -2817,6 +3158,7 @@ def delete_class(class_id):
         if not classes:
             return jsonify({"error": "Class not found"}), 404
         if classes[0]["teacher_id"] != g.user_id:
+            log_security_event("authz.denied.class_delete", "denied", g.user_id)
             return jsonify({"error": "Only the class teacher can delete this class"}), 403
 
         # Remove all student enrollments first
@@ -2846,6 +3188,7 @@ def remove_student(class_id, student_id):
         is_self = student_id == g.user_id
 
         if not is_teacher and not is_self:
+            log_security_event("authz.denied.student_remove", "denied", g.user_id)
             return jsonify({"error": "Not authorized to remove this student"}), 403
 
         _sb_delete("student_classes", {
@@ -2947,6 +3290,7 @@ def create_assignment():
         return jsonify({"error": "Database not configured"}), 500
 
     if _get_role(g.user_id) != "teacher":
+        log_security_event("authz.denied.assignment_create", "denied", g.user_id)
         return jsonify({"error": "Only teachers can create assignments"}), 403
 
     data = request.get_json(silent=True)
@@ -2982,6 +3326,7 @@ def create_assignment():
             referenced_classes.add(str(st["class_id"]))
         for class_id in referenced_classes:
             if not _teacher_owns_class(class_id, g.user_id):
+                log_security_event("authz.denied.assignment_target", "denied", g.user_id)
                 return jsonify({"error": "You can only assign to your own classes"}), 403
 
         video_id = _ensure_video(youtube_id, title=title)
@@ -3178,6 +3523,7 @@ def get_assignment_detail(assignment_id):
 
         # Student: must be a target.
         if not _student_sees_assignment(assignment_id, g.user_id):
+            log_security_event("authz.denied.resource_access", "denied", g.user_id)
             return jsonify({"error": "Access denied"}), 403
         prog = _sb_get("assignment_progress", {
             "select": "*", "assignment_id": f"eq.{assignment_id}", "student_id": f"eq.{g.user_id}",
@@ -3201,6 +3547,7 @@ def delete_assignment(assignment_id):
         if not rows:
             return jsonify({"error": "Assignment not found"}), 404
         if rows[0]["teacher_id"] != g.user_id:
+            log_security_event("authz.denied.assignment_delete", "denied", g.user_id)
             return jsonify({"error": "Only the assigning teacher can delete this assignment"}), 403
 
         _sb_delete("assignment_targets", {"assignment_id": f"eq.{assignment_id}"})
@@ -3226,6 +3573,7 @@ def upsert_assignment_progress(assignment_id):
         return jsonify({"error": "Request body must be a JSON object"}), 400
 
     if not _student_sees_assignment(assignment_id, g.user_id):
+        log_security_event("authz.denied.resource_access", "denied", g.user_id)
         return jsonify({"error": "Access denied"}), 403
 
     def _nn_int(v, default=0):

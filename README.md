@@ -60,7 +60,8 @@ venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-Create `backend/.env` manually (there is no `.env.example` currently):
+Copy `backend/.env.example` to `backend/.env` and fill it in. The example file is
+the authoritative list; the essentials are:
 
 ```env
 # Optional Redis cache
@@ -102,7 +103,7 @@ From `frontend/`:
 npm install
 ```
 
-Create `frontend/.env` (optional but recommended):
+Copy `frontend/.env.example` to `frontend/.env` and fill it in:
 
 ```env
 REACT_APP_API_URL=http://localhost:5000
@@ -244,6 +245,28 @@ With alignment (`lines` supplied), the response also contains
 Errors: `400` when the body is not a JSON object, `paragraphs` is missing/not a
 list of strings, or `from_lang`/`to_lang` are not strings.
 
+### `GET /health`
+
+Dependency health for uptime monitoring and triage. No auth, no body.
+
+```json
+{
+  "status": "ok",
+  "degraded": [],
+  "checks": {
+    "redis": "ok",
+    "supabase": "ok",
+    "translator": "deepl",
+    "caption_relay": "configured",
+    "rate_limiting": "on"
+  }
+}
+```
+
+`status` is `degraded` when a *configured* dependency is unreachable, but the
+response is still 200. Reports configured/reachable state only, never URLs or
+keys, since it is unauthenticated.
+
 ### `GET|POST /api/db-keepalive`
 
 Touches the database so Supabase counts the project as active (see [Keeping
@@ -262,6 +285,15 @@ mean the project was **not** touched. Rate-limited to 60 requests per hour.
 
 - In-memory LRU cache is used for the server-side transcript fetch and processed transcript snippets.
 - Redis cache (if available) is used for processed transcript snippets (already-in-language only) and `/api/translate` responses. The processed-snippet cache is shared by the client-caption and server-fetch paths, keyed on `(video_id, from_lang)`, so a browser fetch for an already-processed video is a free hit.
+- Browser-fetched captions populate that cache too, but only after the server
+  independently corroborates them against YouTube through the caption relay
+  (`CAPTION_RELAY_URL`). `/api/transcript` is unauthenticated and its payload is
+  caller-controlled, so uncorroborated snippets are served to the caller who sent
+  them and never written to the shared key. Without a relay configured nothing is
+  promoted.
+- When a live caption fetch fails, `/api/transcript` serves a previously cached
+  transcript for that `(video_id, from_lang)` rather than erroring, so a
+  YouTube-side outage only affects videos nobody has watched yet.
 - If Redis is unavailable, the backend continues without Redis caching.
 
 ## Smoke Test Script
@@ -288,10 +320,44 @@ cheap indexed read, which is enough to reset Supabase's idle clock. The Worker
 stores no credentials; the backend uses the service key it already has. See that
 directory's README for setup.
 
+## Security and Operations
+
+**Row Level Security.** `backend/db/rls_policies.sql` enables RLS on every table
+and adds least-privilege policies. The backend uses the Supabase service-role key,
+which bypasses RLS, so applying it changes no behavior today; it exists so a
+missed ownership check in application code is contained rather than becoming a
+cross-tenant data leak. Run it in the Supabase SQL editor.
+
+**Health.** `GET /health` reports whether Redis, Supabase, the translator and the
+caption relay are configured and reachable, plus whether DeepL is in quota
+cooldown (which otherwise silently degrades translation quality). It always
+returns 200 when the app can serve traffic, so an optional dependency being down
+doesn't make a load balancer pull a working instance.
+
+**Security event logging.** Authentication and authorization events go to the
+`vidioma.security` logger at WARNING with a stable `event=` name, the client IP,
+the path, and a request id. Metadata only: never tokens or request bodies. Every
+response carries `X-Request-Id` so a user report can be tied to log lines.
+
+**Rate limiting** is keyed per signed-in user when a valid token is present and
+falls back to the client IP otherwise, so a classroom behind one NAT address no
+longer shares a single student's budget. `TRUSTED_PROXY_COUNT` must match the real
+number of proxies in front of the app (1 on Render); a larger value would let
+callers forge `X-Forwarded-For` and mint unlimited buckets.
+
+## Accessibility
+
+The flashlight reveal follows the pointer, so a **Show translation** toggle sits
+above it as the keyboard and screen-reader equivalent; it resets on each new line
+so it can't pre-reveal the next answer. Answer feedback is a `role="status"`
+`aria-live` region so results are announced. Known remaining gaps: the video
+scrub/skip controls and the dashboard tables have not been audited.
+
 ## Current Limitations
 
 - Error responses are basic and can be improved
-- Client-side caption fetching depends on YouTube's innertube/timedtext contract; if YouTube changes it, the server-side fetch fallback still applies
+- Client-side caption fetching depends on YouTube's innertube/timedtext contract. The server-side fetch fallback is IP-blocked on datacenter hosts like Render, so in production the practical fallback is the transcript cache described under Caching Behavior
+- `App.js` carries most of the player state in one component; the session, transcript and translation logic are the natural extraction points
 
 ## Tests
 

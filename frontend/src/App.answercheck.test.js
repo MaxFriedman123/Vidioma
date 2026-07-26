@@ -262,3 +262,60 @@ describe('dragging over the translations does not scroll the page', () => {
     expect(event.defaultPrevented).toBe(false);
   });
 });
+
+describe('accessibility of the translation reveal', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    mockLatestYouTubeProps = null;
+    mockLatestPlayer = null;
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  afterEach(() => {
+    act(() => { jest.runOnlyPendingTimers(); });
+    jest.useRealTimers();
+  });
+
+  // The flashlight reveal is driven by pointer position, so without a toggle the
+  // translations are unreachable for anyone using a keyboard or a screen reader.
+  test('a keyboard-reachable toggle reveals the translation', async () => {
+    await openVideoWithTranslation('te he estado esperando todo el dia');
+
+    const toggle = screen.getByRole('button', { name: /show translation/i });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    await act(async () => { fireEvent.click(toggle); });
+
+    const pressed = screen.getByRole('button', { name: /hide translation/i });
+    expect(pressed).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('the reveal collapses again when toggled off', async () => {
+    await openVideoWithTranslation('te he estado esperando todo el dia');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /show translation/i }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /hide translation/i }));
+    });
+
+    expect(screen.getByRole('button', { name: /show translation/i }))
+      .toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('the answer result is announced to assistive tech', async () => {
+    const input = await openVideoWithTranslation('te he estado esperando todo el dia');
+
+    // The hint is the element that reports Correct / Not quite, so it has to be
+    // a live region or the outcome is silent for a screen-reader user.
+    const hint = document.querySelector('.hint');
+    expect(hint).toHaveAttribute('aria-live', 'polite');
+    expect(hint).toHaveAttribute('role', 'status');
+
+    await submit(input, 'te he estado esperando todo el dia');
+    expect(hint.textContent).toMatch(/correct/i);
+  });
+});
