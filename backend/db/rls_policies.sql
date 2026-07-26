@@ -29,6 +29,30 @@
 -- expose something that was previously hidden.
 -- ----------------------------------------------------------------------------
 
+-- ── Idempotency: drop every policy this file manages, FIRST ────────────────
+-- All drops are hoisted here rather than sitting next to each create. The
+-- Supabase SQL editor runs only the HIGHLIGHTED text when there is a selection,
+-- so a partial run could previously create policies while skipping their drops,
+-- and the next run then failed with "policy ... already exists". With the drops
+-- in one leading block, re-running (or running any later portion) is always safe.
+drop policy if exists own_profile_select                on public.user_profiles;
+drop policy if exists own_profile_insert                on public.user_profiles;
+drop policy if exists own_profile_update                on public.user_profiles;
+drop policy if exists teacher_classes_all               on public.classes;
+drop policy if exists student_reads_enrolled_class      on public.classes;
+drop policy if exists own_enrolment_select              on public.student_classes;
+drop policy if exists own_enrolment_insert              on public.student_classes;
+drop policy if exists enrolment_delete                  on public.student_classes;
+drop policy if exists own_progress_all                  on public.user_progress;
+drop policy if exists videos_read                       on public.videos;
+drop policy if exists teacher_assignments_all           on public.assignments;
+drop policy if exists student_reads_targeted_assignment on public.assignments;
+drop policy if exists targets_select                    on public.assignment_targets;
+drop policy if exists targets_teacher_write             on public.assignment_targets;
+drop policy if exists own_assignment_progress_select    on public.assignment_progress;
+drop policy if exists own_assignment_progress_write     on public.assignment_progress;
+drop policy if exists own_assignment_progress_update    on public.assignment_progress;
+
 -- Enable RLS everywhere. With RLS on and NO policy matching, the default is deny,
 -- so each table below gets explicit policies for the access the app really needs.
 alter table public.user_profiles      enable row level security;
@@ -74,63 +98,51 @@ $$;
 -- 1. user_profiles: a user reads and writes only their own profile row.
 --    Teachers legitimately need student NAMES for their roster, which the app
 --    serves through the service role; RLS does not need to widen this.
-drop policy if exists own_profile_select on public.user_profiles;
 create policy own_profile_select on public.user_profiles
   for select using (user_id = auth.uid());
 
-drop policy if exists own_profile_insert on public.user_profiles;
 create policy own_profile_insert on public.user_profiles
   for insert with check (user_id = auth.uid());
 
-drop policy if exists own_profile_update on public.user_profiles;
 create policy own_profile_update on public.user_profiles
   for update using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- 2. classes: the owning teacher has full control; enrolled students can read.
-drop policy if exists teacher_classes_all on public.classes;
 create policy teacher_classes_all on public.classes
   for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
 
-drop policy if exists student_reads_enrolled_class on public.classes;
 create policy student_reads_enrolled_class on public.classes
   for select using (public.is_enrolled(class_id));
 
 -- 3. student_classes (enrolment): a student sees and creates their own
 --    enrolment (joining by code); the class's teacher sees and removes any
 --    enrolment in their class.
-drop policy if exists own_enrolment_select on public.student_classes;
 create policy own_enrolment_select on public.student_classes
   for select using (student_id = auth.uid() or public.owns_class(class_id));
 
-drop policy if exists own_enrolment_insert on public.student_classes;
 create policy own_enrolment_insert on public.student_classes
   for insert with check (student_id = auth.uid());
 
-drop policy if exists enrolment_delete on public.student_classes;
 create policy enrolment_delete on public.student_classes
   for delete using (student_id = auth.uid() or public.owns_class(class_id));
 
 -- 4. user_progress: strictly private to the user. This is the personal
 --    dashboard; assignment work is tracked separately in assignment_progress.
-drop policy if exists own_progress_all on public.user_progress;
 create policy own_progress_all on public.user_progress
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- 5. videos: shared, non-sensitive metadata (a YouTube id, title, thumbnail).
 --    Readable by any signed-in user; only the service role writes it, since rows
 --    are created as a side effect of processing a video.
-drop policy if exists videos_read on public.videos;
 create policy videos_read on public.videos
   for select using (auth.uid() is not null);
 
 -- 6. assignments: the teacher who created it has full control. A student can
 --    read an assignment only if it targets them, either directly or through a
 --    class they are enrolled in.
-drop policy if exists teacher_assignments_all on public.assignments;
 create policy teacher_assignments_all on public.assignments
   for all using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
 
-drop policy if exists student_reads_targeted_assignment on public.assignments;
 create policy student_reads_targeted_assignment on public.assignments
   for select using (
     exists (
@@ -145,7 +157,6 @@ create policy student_reads_targeted_assignment on public.assignments
 
 -- 7. assignment_targets: visible to the assignment's teacher, and to a student
 --    the row applies to.
-drop policy if exists targets_select on public.assignment_targets;
 create policy targets_select on public.assignment_targets
   for select using (
     public.owns_class(class_id)
@@ -153,14 +164,12 @@ create policy targets_select on public.assignment_targets
     or (student_id is null and public.is_enrolled(class_id))
   );
 
-drop policy if exists targets_teacher_write on public.assignment_targets;
 create policy targets_teacher_write on public.assignment_targets
   for all using (public.owns_class(class_id)) with check (public.owns_class(class_id));
 
 -- 8. assignment_progress: a student reads and writes only their own progress.
 --    The assignment's teacher can read it (that is the whole point of the
 --    teacher view) but never write it.
-drop policy if exists own_assignment_progress_select on public.assignment_progress;
 create policy own_assignment_progress_select on public.assignment_progress
   for select using (
     student_id = auth.uid()
@@ -171,11 +180,9 @@ create policy own_assignment_progress_select on public.assignment_progress
     )
   );
 
-drop policy if exists own_assignment_progress_write on public.assignment_progress;
 create policy own_assignment_progress_write on public.assignment_progress
   for insert with check (student_id = auth.uid());
 
-drop policy if exists own_assignment_progress_update on public.assignment_progress;
 create policy own_assignment_progress_update on public.assignment_progress
   for update using (student_id = auth.uid()) with check (student_id = auth.uid());
 
