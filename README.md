@@ -350,11 +350,13 @@ callers forge `X-Forwarded-For` and mint unlimited buckets.
 
 ## Accessibility
 
-The flashlight reveal follows the pointer, so a **Show translation** toggle sits
-above it as the keyboard and screen-reader equivalent; it resets on each new line
-so it can't pre-reveal the next answer. Answer feedback is a `role="status"`
-`aria-live` region so results are announced. Known remaining gaps: the video
-scrub/skip controls and the dashboard tables have not been audited.
+Answer feedback is a `role="status"` `aria-live` region, so a screen reader
+announces whether an answer was correct instead of the result changing silently.
+
+Known gaps: the flashlight translation reveal is driven by pointer position and
+has no keyboard equivalent, so translations are unreachable without a mouse or
+touchscreen. The video scrub/skip controls and the dashboard tables have not been
+audited either.
 
 ## Current Limitations
 

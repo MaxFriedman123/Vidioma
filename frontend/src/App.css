@@ -411,39 +411,6 @@
   color: #f9bf74;
 }
 
-/* Keyboard/assistive alternative to the pointer-driven flashlight reveal.
-   Deliberately understated so it doesn't compete with the practice UI, but it is
-   a real focusable button with a visible focus ring. */
-.reveal-toggle {
-  align-self: center;
-  margin-bottom: 6px;
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: #9aa3ad;
-  border-radius: 6px;
-  padding: 4px 12px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: color 0.2s ease, border-color 0.2s ease;
-}
-
-.reveal-toggle:hover {
-  color: #7dd3e8;
-  border-color: rgba(125, 211, 232, 0.5);
-}
-
-/* Never remove the focus outline here: this control exists specifically for
-   people navigating by keyboard, who need to see where focus is. */
-.reveal-toggle:focus-visible {
-  outline: 2px solid #7dd3e8;
-  outline-offset: 2px;
-}
-
-.reveal-toggle[aria-pressed="true"] {
-  color: #7dd3e8;
-  border-color: rgba(125, 211, 232, 0.5);
-}
 
 /* ---------------------------------------------------
    BACK BUTTON STYLES

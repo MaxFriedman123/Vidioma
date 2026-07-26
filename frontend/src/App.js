@@ -15,6 +15,7 @@ import AssignmentDetail from './components/AssignmentDetail';
 import { fetchClientCaptions } from './youtubeCaptions';
 import { splitParagraphToLines, getBestWindowSimilarity } from './answerMatching';
 import { useTranslations } from './useTranslations';
+import { useTranscriptLoader } from './useTranscriptLoader';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 // Optional Cloudflare Worker caption-list relay. When set, the browser lists
@@ -185,10 +186,6 @@ function App() {
   // cursor is near — prev, current, or next — independently.
   const [cursorViewport, setCursorViewport] = useState({ x: -9999, y: -9999 });
   const revealRef = useRef(null);
-  // Reveals the whole translation instead of a pointer-following spotlight. The
-  // flashlight is driven by cursor/touch position, so it is the one part of the
-  // app with no keyboard or screen-reader path; this toggle is that path.
-  const [revealAll, setRevealAll] = useState(false);
   const prevLineWrapRef = useRef(null);
   const currentLineWrapRef = useRef(null);
   const nextLineWrapRef = useRef(null);
@@ -236,6 +233,25 @@ function App() {
     activePlayerSessionRef,
     translationRequestControllersRef,
     isCanceledRequestError,
+  });
+
+  // The three launch paths (home GO, dashboard card, assignment) all load a
+  // transcript the same way; the sequence lives in useTranscriptLoader.js so it
+  // isn't written out three times.
+  const loadTranscript = useTranscriptLoader({
+    attachClientCaptions,
+    apiBaseUrl: API_BASE_URL,
+    requestTimeoutMs: TRANSCRIPT_REQUEST_TIMEOUT_MS,
+    timeoutMessage: TRANSCRIPT_TIMEOUT_MESSAGE,
+    activePlayerSessionRef,
+    transcriptRequestControllerRef,
+    isCanceledRequestError,
+    isTimeoutError,
+    setTranscript,
+    setParagraphs,
+    setCurrentLineIndex,
+    setLoadError,
+    setIsLoading,
   });
 
   const clearPlaybackAttemptTimers = useCallback(() => {
@@ -459,8 +475,6 @@ function App() {
     setShowInput(false);
     setUserInput('');
     setAnswered(false);
-    // Collapse the reveal so a new line doesn't start with its answer showing.
-    setRevealAll(false);
     setIsError(false);
     setIsFinished(false);
     setPlayer(null);
@@ -486,54 +500,18 @@ function App() {
       nextVideoId: extractedId,
       launchSource: 'home',
     });
-    const controller = new AbortController();
-    transcriptRequestControllerRef.current = controller;
     // Entering a video always starts from the beginning, even if it's been
     // watched before. (Saved progress is still tracked as a farthest-reached
     // high-water mark for the dashboard, but we no longer resume from it.)
     setCurrentLineIndex(0);
-    try {
-      const requestBody = await attachClientCaptions(extractedId, fromLang, {
-        url: requestUrl,
-        from_lang: fromLang,
-        to_lang: toLang,
-      });
-      // The client caption fetch is async; bail if the user moved on meanwhile.
-      if (activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-      const response = await axios.post(`${API_BASE_URL}/api/transcript`, requestBody, {
-        signal: controller.signal,
-        timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS,
-      });
-      if (activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-
-      const snippets = response.data.snippets;
-      setTranscript(snippets);
-      setParagraphs(response.data.paragraphs || []);
-      setCurrentLineIndex(0);
-    } catch (error) {
-      if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-
-      console.error("Error:", error);
-      setLoadError(
-        (isTimeoutError(error) && TRANSCRIPT_TIMEOUT_MESSAGE) ||
-        error?.response?.data?.error ||
-        "We couldn't load this video. Check the URL and your connection, then try again."
-      );
-    } finally {
-      if (transcriptRequestControllerRef.current === controller) {
-        transcriptRequestControllerRef.current = null;
-      }
-
-      if (activePlayerSessionRef.current === sessionId) {
-        setIsLoading(false);
-      }
-    }
+    await loadTranscript({
+      sessionId,
+      requestUrl,
+      videoId: extractedId,
+      fromLang,
+      toLang,
+      errorMessage: "We couldn't load this video. Check the URL and your connection, then try again.",
+    });
   };
 
   // ── Launch directly from Dashboard card ───────────────────────────
@@ -547,52 +525,15 @@ function App() {
       nextVideoId: youtubeId,
       launchSource: 'dashboard',
     });
-    const controller = new AbortController();
-    transcriptRequestControllerRef.current = controller;
-
-    try {
-      const requestBody = await attachClientCaptions(youtubeId, transcriptLanguage, {
-        url: requestUrl,
-        from_lang: transcriptLanguage,
-        to_lang: translationLanguage,
-      });
-      if (activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-      const response = await axios.post(`${API_BASE_URL}/api/transcript`, requestBody, {
-        signal: controller.signal,
-        timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS,
-      });
-
-      if (activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-
-      const snippets = response.data.snippets;
-      setTranscript(snippets);
-      setParagraphs(response.data.paragraphs || []);
-      // Always start from the beginning, even when relaunched from the dashboard.
-      setCurrentLineIndex(0);
-    } catch (error) {
-      if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) {
-        return;
-      }
-
-      console.error('Error:', error);
-      setLoadError(
-        (isTimeoutError(error) && TRANSCRIPT_TIMEOUT_MESSAGE) ||
-        error?.response?.data?.error ||
-        "We couldn't load this video. Please try again."
-      );
-    } finally {
-      if (transcriptRequestControllerRef.current === controller) {
-        transcriptRequestControllerRef.current = null;
-      }
-
-      if (activePlayerSessionRef.current === sessionId) {
-        setIsLoading(false);
-      }
-    }
+    // Always start from the beginning, even when relaunched from the dashboard.
+    await loadTranscript({
+      sessionId,
+      requestUrl,
+      videoId: youtubeId,
+      fromLang: transcriptLanguage,
+      toLang: translationLanguage,
+      errorMessage: "We couldn't load this video. Please try again.",
+    });
   };
 
   // ── Launch an assignment into the player (student, no-skip mode) ──────
@@ -625,37 +566,19 @@ function App() {
       nextVideoId: youtubeId,
       launchSource: 'assignment',
     });
-    const controller = new AbortController();
-    transcriptRequestControllerRef.current = controller;
-
-    try {
-      const requestBody = await attachClientCaptions(youtubeId, tLang, {
-        url: requestUrl, from_lang: tLang, to_lang: trLang,
-      });
-      if (activePlayerSessionRef.current !== sessionId) return;
-      const response = await axios.post(`${API_BASE_URL}/api/transcript`, requestBody,
-        { signal: controller.signal, timeout: TRANSCRIPT_REQUEST_TIMEOUT_MS });
-      if (activePlayerSessionRef.current !== sessionId) return;
-
-      const snippets = response.data.snippets;
-      setTranscript(snippets);
-      setParagraphs(response.data.paragraphs || []);
+    await loadTranscript({
+      sessionId,
+      requestUrl,
+      videoId: youtubeId,
+      fromLang: tLang,
+      toLang: trLang,
+      errorMessage: "We couldn't load this assignment. Please try again.",
       // Resume from the assignment's own saved progress (not personal progress).
-      const resume = assignment.progress?.current_line_index ?? 0;
-      const safeStart = (resume > 0 && resume < snippets.length) ? resume : 0;
-      setCurrentLineIndex(safeStart);
-    } catch (error) {
-      if (isCanceledRequestError(error) || activePlayerSessionRef.current !== sessionId) return;
-      console.error('Assignment load error:', error);
-      setLoadError(
-        (isTimeoutError(error) && TRANSCRIPT_TIMEOUT_MESSAGE) ||
-        error?.response?.data?.error ||
-        "We couldn't load this assignment. Please try again."
-      );
-    } finally {
-      if (transcriptRequestControllerRef.current === controller) transcriptRequestControllerRef.current = null;
-      if (activePlayerSessionRef.current === sessionId) setIsLoading(false);
-    }
+      startLineFor: (snippets) => {
+        const resume = assignment.progress?.current_line_index ?? 0;
+        return (resume > 0 && resume < snippets.length) ? resume : 0;
+      },
+    });
   };
 
   // Persist progress for the active assignment (kept out of the personal
@@ -706,8 +629,6 @@ function App() {
     setShowInput(false);
     setUserInput('');
     setAnswered(false);
-    // Collapse the reveal so a new line doesn't start with its answer showing.
-    setRevealAll(false);
     setIsError(false);
     setLoadError(null);
     // Bumping the session above means the in-flight transcript request's finally
@@ -796,7 +717,6 @@ function App() {
               setShowInput(false);
               setUserInput('');
               setAnswered(false);
-              setRevealAll(false);
             }
             return; // ignore the forward seek entirely
           }
@@ -1049,11 +969,6 @@ function App() {
   // lights only the next line, etc. Returns undefined when the ref isn't
   // mounted yet (mask omitted -> layer hidden until first paint).
   const buildRevealMask = (wrapRef) => {
-    // Keyboard/assistive equivalent of sweeping the flashlight: when the reveal
-    // is toggled on, drop the mask entirely so the text is simply visible. The
-    // spotlight is a pointer-position effect, so without this the translations
-    // were unreachable for anyone not using a mouse or touchscreen.
-    if (revealAll) return undefined;
     const el = wrapRef.current;
     if (!el) return undefined;
     const rect = el.getBoundingClientRect();
@@ -1347,18 +1262,6 @@ function App() {
                   {/* Translation display — mirrors the source scroll with prev/current/next
                       lines. The full paragraph is translated for context, then split per
                       source line for display. */}
-                  {/* Keyboard-reachable equivalent of the flashlight sweep. Placed
-                      before the reveal area so tab order hits it first. */}
-                  {!translationPending && !translationFailed && (
-                    <button
-                      type="button"
-                      className="reveal-toggle"
-                      onClick={() => setRevealAll((v) => !v)}
-                      aria-pressed={revealAll}
-                    >
-                      {revealAll ? 'Hide translation' : 'Show translation'}
-                    </button>
-                  )}
                   <div
                     className="reveal-container"
                     ref={revealRef}

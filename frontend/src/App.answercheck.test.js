@@ -263,7 +263,7 @@ describe('dragging over the translations does not scroll the page', () => {
   });
 });
 
-describe('accessibility of the translation reveal', () => {
+describe('accessibility of answer feedback', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
@@ -276,34 +276,6 @@ describe('accessibility of the translation reveal', () => {
   afterEach(() => {
     act(() => { jest.runOnlyPendingTimers(); });
     jest.useRealTimers();
-  });
-
-  // The flashlight reveal is driven by pointer position, so without a toggle the
-  // translations are unreachable for anyone using a keyboard or a screen reader.
-  test('a keyboard-reachable toggle reveals the translation', async () => {
-    await openVideoWithTranslation('te he estado esperando todo el dia');
-
-    const toggle = screen.getByRole('button', { name: /show translation/i });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
-
-    await act(async () => { fireEvent.click(toggle); });
-
-    const pressed = screen.getByRole('button', { name: /hide translation/i });
-    expect(pressed).toHaveAttribute('aria-pressed', 'true');
-  });
-
-  test('the reveal collapses again when toggled off', async () => {
-    await openVideoWithTranslation('te he estado esperando todo el dia');
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /show translation/i }));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /hide translation/i }));
-    });
-
-    expect(screen.getByRole('button', { name: /show translation/i }))
-      .toHaveAttribute('aria-pressed', 'false');
   });
 
   test('the answer result is announced to assistive tech', async () => {
