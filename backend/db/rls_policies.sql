@@ -65,21 +65,25 @@ alter table public.assignment_targets enable row level security;
 alter table public.assignment_progress enable row level security;
 
 -- Helper: is the current user the teacher who owns this class?
+--
 -- SECURITY DEFINER so the function itself can read classes without recursing
--- through the policy that calls it (a policy that queries its own table would
--- otherwise deadlock into infinite recursion).
+-- through the policy that calls it. The cycle it breaks is real: a policy on
+-- student_classes that queried classes directly would trigger the classes SELECT
+-- policy, which checks enrolment in student_classes, which re-triggers the first
+-- policy. Postgres reports that as infinite recursion and the query fails.
+--
+-- The body is a single-quoted string rather than $$-quoted. Dollar-quoting is the
+-- idiomatic form, but $$ is also LaTeX display-math syntax, so it can be eaten
+-- when this file is copied through a chat or docs renderer, leaving a body
+-- Postgres rejects with "syntax error at or near select". Neither body contains a
+-- quote, so a plain string needs no escaping and survives any copy path.
 create or replace function public.owns_class(cls uuid)
 returns boolean
 language sql
 security definer
 set search_path = public
 stable
-as $$
-  select exists (
-    select 1 from public.classes c
-    where c.class_id = cls and c.teacher_id = auth.uid()
-  );
-$$;
+as 'select exists ( select 1 from public.classes c where c.class_id = cls and c.teacher_id = auth.uid() );';
 
 -- Helper: is the current user enrolled in this class?
 create or replace function public.is_enrolled(cls uuid)
@@ -88,12 +92,7 @@ language sql
 security definer
 set search_path = public
 stable
-as $$
-  select exists (
-    select 1 from public.student_classes sc
-    where sc.class_id = cls and sc.student_id = auth.uid()
-  );
-$$;
+as 'select exists ( select 1 from public.student_classes sc where sc.class_id = cls and sc.student_id = auth.uid() );';
 
 -- 1. user_profiles: a user reads and writes only their own profile row.
 --    Teachers legitimately need student NAMES for their roster, which the app
