@@ -384,9 +384,11 @@ describe('Playback overlay behavior', () => {
     expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
   });
 
-  test('home autostart falls back to playing if the translation is very slow', async () => {
-    // Safety valve: a translation that never resolves must not block playback
-    // forever — after the max-wait the video starts anyway (delayed, not denied).
+  test('home autostart never plays while the translation is unresolved', async () => {
+    // The video must not start until the starting paragraph's translation has
+    // loaded, with no time limit: there used to be a ~12s safety valve that
+    // started playback anyway, which dropped the user onto a line the answer box
+    // refuses. Waiting is visible (skeleton / retry message), never silent.
     setUpGuestSession();
     const translation = createDeferred(); // never resolved
     axios.post.mockImplementation((url) => {
@@ -410,18 +412,61 @@ describe('Playback overlay behavior', () => {
       expect(screen.getByTestId('youtube-player')).toBeInTheDocument();
     });
 
-    // Before the max-wait elapses, playback is still held.
-    await act(async () => { jest.advanceTimersByTime(2000); });
-    expect(mockLatestPlayer.playVideo).not.toHaveBeenCalled();
-
-    // Past the safety timeout (~30 rechecks * 400ms + the 500ms start timer) ->
-    // the video starts regardless. Each recheck tick is a state update that
-    // schedules the next timer, so drive them one at a time with a React flush
-    // between, the way they'd fire in real time.
+    // Well past the old 12s valve (40 rechecks x 400ms + the 500ms start timer).
+    // Each recheck is a state update that schedules the next timer, so drive them
+    // one at a time with a React flush between, the way they'd fire in real time.
     for (let i = 0; i < 40; i++) {
       await act(async () => { jest.advanceTimersByTime(400); });
     }
     await act(async () => { jest.advanceTimersByTime(600); });
+    expect(mockLatestPlayer.playVideo).not.toHaveBeenCalled();
+
+    // And it starts as soon as the translation finally lands.
+    await act(async () => {
+      translation.resolve({ data: { translated_paragraphs: translatedParagraphs, translated_lines: [['hola', 'mundo']] } });
+    });
+    await act(async () => { jest.advanceTimersByTime(600); });
+    expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
+  });
+
+  test('home autostart stays held when the translation FAILS', async () => {
+    // A failed translation used to count as "settled" and start playback. The
+    // answer box rejects input without a translation, so playback stays held
+    // while the auto-retry runs.
+    setUpGuestSession();
+    let translateCalls = 0;
+    axios.post.mockImplementation((url) => {
+      if (url.includes('/api/transcript')) {
+        return Promise.resolve({ data: { snippets, paragraphs } });
+      }
+      if (url.includes('/api/translate')) {
+        translateCalls += 1;
+        // Fail the first attempt, succeed once the auto-retry fires.
+        if (translateCalls === 1) return Promise.reject(new Error('provider down'));
+        return Promise.resolve({ data: { translated_paragraphs: translatedParagraphs, translated_lines: [['hola', 'mundo']] } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    await act(async () => { renderApp(); });
+    fireEvent.change(screen.getByPlaceholderText('Paste YouTube URL...'), {
+      target: { value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'GO' }));
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('youtube-player')).toBeInTheDocument();
+    });
+
+    // The failure has landed; playback must still be held.
+    await act(async () => { jest.advanceTimersByTime(1500); });
+    expect(mockLatestPlayer.playVideo).not.toHaveBeenCalled();
+
+    // The auto-retry (4s) succeeds, and only then does the video start.
+    await act(async () => { jest.advanceTimersByTime(4000); });
+    await act(async () => { jest.advanceTimersByTime(600); });
+    expect(translateCalls).toBeGreaterThan(1);
     expect(mockLatestPlayer.playVideo).toHaveBeenCalled();
   });
 });
