@@ -1,10 +1,31 @@
 import os
+
 from dotenv import load_dotenv
+
 load_dotenv()  # Load environment variables from .env file
 
-from flask import Flask, request, jsonify, g
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
+
+from .util.text import (
+    _NO_SPACE_CHAR_RE,
+    _WORD_RE,
+    _is_no_space_script,
+    _segment_units,
+    _tokenize,
+    _xml_escape,
+    _xml_unescape,
+)
+
+# Pure helpers extracted to submodules. Imported into this namespace so every
+# existing `app.<name>` reference (including the ones tests reach for) keeps
+# resolving here, and so callers defined in THIS module still find them as
+# globals: a function's globals resolve where it was defined, not where it was
+# imported, so moving a helper without re-importing it here would silently break
+# any monkeypatch of it.
+from .util.video_id import _BARE_ID_RE, _YOUTUBE_ID_RE, extract_video_id
+
 try:
     from flask_limiter import Limiter
     from flask_limiter.util import get_remote_address
@@ -12,32 +33,36 @@ except Exception:  # pragma: no cover - limiter optional; app runs unthrottled i
     Limiter = None
     get_remote_address = None
 from youtube_transcript_api import YouTubeTranscriptApi
+
 try:
     from youtube_transcript_api.proxies import GenericProxyConfig
 except Exception:  # pragma: no cover - older library versions
     GenericProxyConfig = None
-import re
-import json
 import hashlib
 import hmac
-import string
+import json
 import random
+import re
+import string
+
 import redis
 import requests as http_requests
 from requests.adapters import HTTPAdapter
+
 try:
     from urllib3.util.retry import Retry
 except Exception:  # pragma: no cover - very old urllib3
     Retry = None
-from datetime import datetime, timezone
-from deep_translator import GoogleTranslator
-from functools import lru_cache, wraps
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
-import jwt
 import logging
 import time
 import uuid as uuid_mod
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from datetime import datetime, timezone
+from functools import lru_cache, wraps
 
+import jwt
+from deep_translator import GoogleTranslator
 
 # ── Logging ────────────────────────────────────────────────────────────────
 # The app previously used bare print(), which gives no level, no timestamp, and
@@ -138,6 +163,7 @@ _TRANSLATE_CALL_TIMEOUT = 12.0
 def _install_deep_translator_timeout(default_timeout):
     try:
         import importlib
+
         import requests as _rq
 
         def _with_timeout(func):
@@ -189,11 +215,13 @@ _INNERTUBE_CONST_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 # API untouched.
 _FastTranscriptListFetcher = None
 try:
-    from youtube_transcript_api import _transcripts as _yta_transcripts
     from youtube_transcript_api import _settings as _yta_settings
+    from youtube_transcript_api import _transcripts as _yta_transcripts
+    from youtube_transcript_api._errors import (
+        IpBlocked as _YTAIpBlocked,
+    )
     from youtube_transcript_api._errors import (
         RequestBlocked as _YTARequestBlocked,
-        IpBlocked as _YTAIpBlocked,
     )
 
     _StockFetcher = _yta_transcripts.TranscriptListFetcher
@@ -683,27 +711,6 @@ def health():
         "degraded": degraded,
         "checks": checks,
     })
-
-# Utility function to extract video ID from various YouTube URL formats
-# Handles watch?v=, youtu.be/, /embed/, /v/, /shorts/, and bare 11-char IDs,
-# plus trailing query/fragment params (?t=30, &feature=...).
-_YOUTUBE_ID_RE = re.compile(
-    r'(?:youtu\.be/|/embed/|/v/|/shorts/|watch\?v=|[?&]v=)([0-9A-Za-z_-]{11})'
-)
-_BARE_ID_RE = re.compile(r'^[0-9A-Za-z_-]{11}$')
-
-
-def extract_video_id(url):
-    if not isinstance(url, str):
-        return None
-    url = url.strip()
-    match = _YOUTUBE_ID_RE.search(url)
-    if match:
-        return match.group(1)
-    # Allow callers to pass a bare 11-character video ID directly.
-    if _BARE_ID_RE.match(url):
-        return url
-    return None
 
 @lru_cache(maxsize=100)
 def get_cached_transcript(video_id, from_lang):
@@ -1593,22 +1600,6 @@ _DEEPL_LINE_CLOSE = "</ln>"
 _DEEPL_LINE_RE = re.compile(r"<ln\b[^>]*>(.*?)</ln>", re.DOTALL | re.IGNORECASE)
 
 
-def _xml_escape(text):
-    return (
-        text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    )
-
-
-def _xml_unescape(text):
-    return (
-        text.replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&")
-    )
-
-
 def _deepl_translate_lines(lines, target_lang, source_lang="auto"):
     """Translate a paragraph's subtitle lines into per-line target strings,
     preserving full paragraph context AND exact 1:1 line correspondence.
@@ -1909,60 +1900,6 @@ def _proportional_sentence_split(translated, source_paragraphs):
     return chunks
 
 
-# ── Line-level alignment ────────────────────────────────────────────────
-# Proportional splitting of a paragraph translation across lines breaks down
-# when source and target languages reorder words (e.g. "you want to speak"
-# → "quieres hablar" places the verb at the end). We instead:
-#   1. Translate each source line individually — low-quality but gives us a
-#      "semantic fingerprint" of what words belong to that line.
-#   2. Align the full paragraph translation to those fingerprints via DP,
-#      maximising word-overlap between each span and its anchor fingerprint.
-# The displayed text still comes from the high-quality paragraph translation;
-# the anchors are only used to decide where to cut it.
-
-_WORD_RE = re.compile(r"[^\w']+", re.UNICODE)
-
-# Scripts without spaces between words (CJK + Thai). For these, splitting on
-# whitespace yields ~1 "word" for a whole paragraph, which used to collapse the
-# per-line split (everything on one line, the rest blank). We segment these into
-# character units instead so the fallback splitter has something to distribute.
-_NO_SPACE_CHAR_RE = re.compile(
-    r"[぀-ヿ"      # Hiragana + Katakana
-    r"㐀-䶿"       # CJK Ext A
-    r"一-鿿"       # CJK Unified
-    r"豈-﫿"       # CJK Compatibility
-    r"ｦ-ﾟ"       # Halfwidth Katakana
-    r"฀-๿]"      # Thai
-)
-
-
-def _tokenize(text):
-    if not text:
-        return []
-    return [tok for tok in _WORD_RE.split(text.lower()) if tok]
-
-
-def _is_no_space_script(text):
-    """True when the text is mostly a no-space script (CJK/Thai), so it should
-    be segmented by character rather than by whitespace."""
-    if not text:
-        return False
-    cjk = len(_NO_SPACE_CHAR_RE.findall(text))
-    # If a large share of non-space characters are CJK/Thai, treat as no-space.
-    non_space = sum(1 for ch in text if not ch.isspace())
-    return non_space > 0 and (cjk / non_space) >= 0.3
-
-
-def _segment_units(text):
-    """Split text into display units for alignment: whitespace-delimited words
-    for spaced scripts, or individual characters for no-space scripts (CJK/Thai)
-    so per-line splitting has enough granularity to distribute across lines."""
-    if not text:
-        return []
-    if _is_no_space_script(text):
-        # Keep non-space characters as individual units (drop spaces).
-        return [ch for ch in text if not ch.isspace()]
-    return text.split()
 
 
 def align_lines_to_paragraph(paragraph_translation, line_anchors):

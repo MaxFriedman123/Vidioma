@@ -9,10 +9,49 @@ on:
   pull_request:
     branches: [main]
 
+# The default GITHUB_TOKEN is write-scoped; nothing here needs to write, and a
+# compromised transitive dev dependency would otherwise run with push rights.
+permissions:
+  contents: read
+
+# Pushing twice to a branch should not run both to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: backend/.python-version
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      # Rules are scoped to bug-finders (pyflakes + bugbear + import order), not
+      # style, so a failure here means something is actually wrong.
+      - name: Ruff lint
+        working-directory: backend
+        run: ruff check .
+      # Both Workers deploy to production and are otherwise never validated by
+      # CI. A malformed keepalive Worker means Supabase silently pauses.
+      - name: Syntax-check the Cloudflare Workers
+        run: |
+          node --check cloudflare-worker/src/worker.js
+          node --check cloudflare-worker-keepalive/src/worker.js
+
   backend:
     name: Backend (pytest)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,6 +74,7 @@ jobs:
   frontend:
     name: Frontend (tests + build)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

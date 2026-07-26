@@ -277,7 +277,9 @@ class TestDeeplStructuredLines(unittest.TestCase):
         app.DEEPL_API_KEY = ""
 
     def test_xml_happy_path_is_one_to_one(self):
-        import app, re
+        import re
+
+        import app
 
         def mock(texts, target_lang, source_lang="auto", extra_params=None):
             if (extra_params or {}).get("tag_handling") == "xml":
@@ -292,7 +294,9 @@ class TestDeeplStructuredLines(unittest.TestCase):
         self.assertEqual(out, ["T:one", "T:two", "T:three"])
 
     def test_empty_lines_reinserted_at_correct_index(self):
-        import app, re
+        import re
+
+        import app
 
         def mock(texts, target_lang, source_lang="auto", extra_params=None):
             if (extra_params or {}).get("tag_handling") == "xml":
@@ -336,7 +340,9 @@ class TestDeeplStructuredLines(unittest.TestCase):
         self.assertIsNone(out)
 
     def test_orchestrator_paragraph_equals_join_of_lines(self):
-        import app, re
+        import re
+
+        import app
 
         def mock(texts, target_lang, source_lang="auto", extra_params=None):
             if (extra_params or {}).get("tag_handling") == "xml":
@@ -408,7 +414,9 @@ class TestTranslateWithAlignmentDeadline(unittest.TestCase):
     if a paragraph task hangs — the backstop against the infinite spinner."""
 
     def test_returns_within_cap_when_a_paragraph_hangs(self):
-        import app, time
+        import time
+
+        import app
 
         orig_timeout = app._TRANSLATE_CALL_TIMEOUT
         orig_deepl = app._deepl_available

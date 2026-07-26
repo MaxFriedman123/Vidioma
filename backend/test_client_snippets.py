@@ -331,8 +331,11 @@ class TestSelectCaptionTrackUrl(unittest.TestCase):
         self.assertIn("lang=fr", r["url"])
 
     def test_no_tracks_raises(self):
+        # Assert the specific type: assertRaises(Exception) also passes on an
+        # AttributeError or a typo in the call, so it would keep passing after the
+        # behaviour it guards was broken.
         self._set_tracks([])
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError):
             app.select_caption_track_url("vid", "en")
 
 

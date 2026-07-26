@@ -1,0 +1,45 @@
+# Tool configuration only. This is a deployed Flask app run by gunicorn, not a
+# distributed library, so there is deliberately no [project] table and no build
+# backend: adding packaging metadata for something that is never published would
+# be ceremony.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = ["venv", "__pycache__"]
+
+[tool.ruff.lint]
+# Bug-finders first, deliberately narrow so the rule set is meaningful rather
+# than a wall of style noise nobody reads:
+#   E4/E7/E9 - real syntax/logic errors
+#   F        - pyflakes: undefined names, unused imports. The highest-value rule
+#              in a 3.6k-line module with broad `except Exception` handlers.
+#   B        - bugbear: mutable defaults, bad except, loop-variable capture
+#   I        - import sorting, so import blocks stop drifting
+select = ["E4", "E7", "E9", "F", "B", "I"]
+ignore = [
+    # The formatter owns wrapping; reporting long lines as well is double-counting.
+    "E501",
+    # Flask/decorator calls in argument defaults are idiomatic here.
+    "B008",
+    # load_dotenv() MUST run before the imports that read os.environ at import
+    # time, and several optional third-party imports are deliberately guarded by
+    # try/except after that. Both are correct here, so import-position is noise.
+    "E402",
+    # zip(strict=) would be right in new code, but flagging every existing
+    # same-length zip is churn with no defect behind it. Revisit as a separate pass.
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately rebind module attributes and shadow names to stub them out.
+"test_*.py" = ["F811"]
+# The package root re-exports helpers that moved to submodules. The imports look
+# unused here but they are load-bearing: functions defined in this module resolve
+# their globals here, so removing them would break every caller.
+"app/__init__.py" = ["F401"]
+
+[tool.ruff.format]
+# Matches the existing majority in app/__init__.py (18 double vs 6 single on
+# route decorators), so adopting the formatter is not a repo-wide rewrite.
+quote-style = "double"

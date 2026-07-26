@@ -8,6 +8,7 @@ Run from the backend directory:
 """
 
 import os
+
 import redis
 from dotenv import load_dotenv
 

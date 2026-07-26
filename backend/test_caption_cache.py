@@ -18,7 +18,6 @@ from unittest import mock
 
 import app
 
-
 SNIPPETS = [
     {"text": "hello there", "start": 0.0, "duration": 2.0},
     {"text": "general kenobi", "start": 2.0, "duration": 2.0},

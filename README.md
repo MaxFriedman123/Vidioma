@@ -35,8 +35,11 @@ Vidioma is an interactive language practice app for YouTube videos. You paste a 
 ```text
 Vidioma/
   backend/
-    app.py                     the whole Flask API
+    app/__init__.py            the Flask API (being split into modules; see below)
+    app/util/                  pure helpers (text tokenising, video-id parsing)
+    wsgi.py                    WSGI entry point (gunicorn wsgi:app)
     db/                        SQL to run in the Supabase editor (schema + RLS)
+    pyproject.toml             ruff config
     smoke_api.py               manual latency check (not part of the suite)
     test_*.py                  pytest suite
     requirements.txt
@@ -147,6 +150,9 @@ runs a React frontend in the user's residential browser. So captions are fetched
 3. It posts the resulting snippets to `POST /api/transcript` as
    `client_snippets`; the backend runs its existing cleaning + paragraph
    grouping + (when needed) DeepL translation pipeline on them, unchanged.
+
+See `docs/caption-egress.md` for the measured comparison of every $0 egress
+option across a fixed 22-video corpus, and the layered fallback design.
 
 This is a zero-cost replacement for the proxy. It is also fault-tolerant:
 `frontend/src/youtubeCaptions.js` returns `null` on any failure, and the backend
@@ -362,7 +368,8 @@ audited either.
 
 - Error responses are basic and can be improved
 - Client-side caption fetching depends on YouTube's innertube/timedtext contract. The server-side fetch fallback is IP-blocked on datacenter hosts like Render, so in production the practical fallback is the transcript cache described under Caching Behavior
-- `App.js` carries most of the player state in one component; the session, transcript and translation logic are the natural extraction points
+- `App.js` carries most of the player state in one component; the session and playback logic are the natural remaining extraction points (translation and transcript loading are already extracted to hooks)
+- `backend/app/__init__.py` is still one large module. It is now a package so it can be split incrementally, but the split is constrained: the test suite monkeypatches ~21 module attributes, and Python resolves a function's globals in the module where it was *defined*. Moving a function away from its caller silently makes those patches no-ops, so tests would keep passing while exercising the real network. Any further extraction has to move a patched name together with every caller, or update the patch paths in the same commit
 
 ## Tests
 

@@ -1,4 +1,9 @@
 # Test/dev-only dependencies (not installed in production). CI installs this on
 # top of requirements.txt. Keeps pytest & friends out of the runtime image.
+#
+# Pinned for the same reason the runtime deps are: an unpinned tool decides
+# whether CI is green, so a floating major could turn the build red on a commit
+# that changed nothing. Bump deliberately and let the suite prove it.
 -r requirements.txt
-pytest
+pytest==9.1.1
+ruff==0.16.0
