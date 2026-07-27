@@ -763,6 +763,103 @@
 /* ---------------------------------------------------
    RESPONSIVE: TABLET & MOBILE (<=768px)
 --------------------------------------------------- */
+/* ---------------------------------------------------
+   PRACTICE MODE (translate / listen / dictate)
+--------------------------------------------------- */
+/* Mode chips sit in the landing form itself so listening is as discoverable as
+   translating, rather than buried in a settings menu. */
+.mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px 0;
+  box-sizing: border-box;
+}
+
+.mode-chip {
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  color: #555;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.mode-chip:hover {
+  border-color: #7dd3e8;
+  color: #2b2d35;
+}
+
+/* Never remove this outline: the chips are a radiogroup and keyboard users need
+   to see which one has focus. */
+.mode-chip:focus-visible {
+  outline: 2px solid #2b2d35;
+  outline-offset: 2px;
+}
+
+.mode-chip-active {
+  background: #2b2d35;
+  border-color: #2b2d35;
+  color: #7dd3e8;
+}
+
+.mode-hint {
+  margin: 8px 12px 0;
+  font-size: 0.78rem;
+  color: #777;
+  text-align: center;
+}
+
+/* The hidden source line in listening modes. Blurred and non-selectable rather
+   than removed from the DOM: it keeps the layout from jumping when revealed, and
+   keeps the text available to assistive tech that a learner has opted into. */
+.source-hidden {
+  filter: blur(7px);
+  user-select: none;
+  -webkit-user-select: none;
+  transition: filter 0.18s ease;
+}
+
+.listen-controls {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.listen-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #9aa3ad;
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.listen-btn:hover {
+  color: #7dd3e8;
+  border-color: rgba(125, 211, 232, 0.5);
+}
+
+.listen-btn:focus-visible {
+  outline: 2px solid #7dd3e8;
+  outline-offset: 2px;
+}
+
+.listen-btn[aria-pressed="true"] {
+  color: #7dd3e8;
+  border-color: rgba(125, 211, 232, 0.5);
+}
+
 @media (max-width: 768px) {
   /* Navbar: hide desktop actions, show mobile controls */
   .navbar-desktop {
@@ -858,6 +955,22 @@
   /* Row 1 keeps the bar's top corners; the wrapped GO owns the bottom ones. */
   .search-bar-top {
     border-radius: 12px 12px 0 0;
+  }
+
+  /* Practice mode chips: smaller and tighter so three fit without overflow. */
+  .mode-chip {
+    padding: 5px 10px;
+    font-size: 0.75rem;
+  }
+
+  .mode-row {
+    gap: 6px;
+    padding: 8px 8px 0;
+  }
+
+  .mode-hint {
+    font-size: 0.72rem;
+    margin: 6px 8px 0;
   }
 
   /* Landing title */

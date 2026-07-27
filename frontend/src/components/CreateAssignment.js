@@ -1,8 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { useAuth } from '../AuthContext';
 
+// Same one-line env reads App.js uses (kept local, as with LANGUAGES below).
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+// Optional Cloudflare Worker caption-list relay, same contract as the backend's
+// /api/caption-tracks. See docs/caption-egress.md.
+const CAPTION_RELAY_URL = (process.env.REACT_APP_CAPTION_RELAY_URL || '').replace(/\/$/, '');
 
 // Same language list the main app uses (kept local to avoid a circular import).
 const LANGUAGES = [
@@ -19,17 +23,78 @@ const LANGUAGES = [
   { code: 'ru', name: 'Russian' },
 ];
 
+const langName = (code) => (LANGUAGES.find((l) => l.code === code) || {}).name || code;
+
+// The title lookup is a convenience, never a blocker, so keep it short.
+const TITLE_LOOKUP_TIMEOUT_MS = 6000;
+
+// A bare 11-char video id is a valid thing to paste (the backend parses it), but
+// YouTube's oEmbed endpoint needs a real watch URL, so build one.
+const toWatchUrl = (raw) => (/^[\w-]{11}$/.test(raw) ? `https://www.youtube.com/watch?v=${raw}` : raw);
+
+// Ask a caption-list endpoint whether this video has captions in `fromLang`.
+// Returns 'ok' | 'translated' | 'missing' | 'unknown'; 'unknown' means the
+// listing itself failed, which says nothing about the video.
+async function checkCaptions(endpoint, target, fromLang) {
+  try {
+    const resp = await axios.post(endpoint, { url: target, from_lang: fromLang });
+    return resp.data?.is_correct_lang ? 'ok' : 'translated';
+  } catch (err) {
+    // 404 is the real "no captions here" answer. Anything else (a 503 from a
+    // YouTube blip, a network drop) must not cry wolf.
+    return err.response?.status === 404 ? 'missing' : 'unknown';
+  }
+}
+
+// Text + status class per pre-flight outcome. Reuses the existing assignment
+// status colours (green / amber / grey) plus .assignment-due-overdue for red, so
+// this needs no new CSS.
+const CAPTION_NOTES = {
+  checking: { cls: 'assignment-status-notstarted', text: () => 'Checking captions...' },
+  ok: { cls: 'assignment-status-complete', text: (lang) => `Captions available in ${lang}` },
+  translated: { cls: 'assignment-status-progress', text: () => 'Only auto-translated captions available' },
+  missing: {
+    cls: 'assignment-status-notstarted assignment-due-overdue',
+    text: (lang) => `No captions found in ${lang}. You can still assign it.`,
+  },
+  // The check itself failed, which says nothing about the video.
+  unknown: { cls: 'assignment-status-notstarted', text: () => 'Could not check captions right now.' },
+};
+
+// Inline caption pre-flight indicator. A WARNING, never a gate: YouTube listing
+// blips are common, and a teacher preparing a lesson late at night must still be
+// able to save.
+function CaptionNote({ check }) {
+  const note = check && CAPTION_NOTES[check.state];
+  if (!note) return null;
+  return (
+    <p className={note.cls} style={{ margin: '8px 0 0', overflowWrap: 'anywhere' }}>
+      {note.text(check.lang)}
+    </p>
+  );
+}
+
 // Teacher page: create a video assignment for whole classes and/or individual
 // students, with an optional due date and practice language pair.
-export default function CreateAssignment({ onBack, onCreated }) {
+//
+// `prefill` (optional) seeds the video/language/instruction fields, used by the
+// Duplicate action in ClassView. Targets are never prefilled: the teacher picks
+// which class gets the copy.
+export default function CreateAssignment({ onBack, onCreated, prefill }) {
   const { accessToken } = useAuth();
 
-  const [url, setUrl] = useState('');
-  const [title, setTitle] = useState('');
-  const [fromLang, setFromLang] = useState('en');
-  const [toLang, setToLang] = useState('es');
+  const [url, setUrl] = useState(prefill?.url || '');
+  const [title, setTitle] = useState(prefill?.title || '');
+  const [fromLang, setFromLang] = useState(prefill?.transcript_language || 'en');
+  const [toLang, setToLang] = useState(prefill?.translation_language || 'es');
   const [dueDate, setDueDate] = useState('');
-  const [instructions, setInstructions] = useState('');
+  const [instructions, setInstructions] = useState(prefill?.instructions || '');
+
+  // Caption pre-flight result: { state, lang }. state is one of 'checking',
+  // 'ok', 'translated', 'missing', 'unknown'. Advisory only.
+  const [captionCheck, setCaptionCheck] = useState(null);
+  const captionReqRef = useRef(0);   // ignores out-of-order responses
+  const lastCheckedRef = useRef(''); // "url|lang" already checked
 
   const [classes, setClasses] = useState([]);
   const [loadingClasses, setLoadingClasses] = useState(true);
@@ -41,6 +106,13 @@ export default function CreateAssignment({ onBack, onCreated }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  // The URL the pre-flight check runs against: set when the URL field blurs (so
+  // we don't fire a request per keystroke), and seeded from a prefill so a
+  // duplicated assignment is checked without the teacher touching the field.
+  // `nonce` bumps on every blur so re-blurring an unchanged URL can retry an
+  // inconclusive check (setting identical state alone would not re-run).
+  const [preflight, setPreflight] = useState({ url: prefill?.url || '', nonce: 0 });
+
   // Load the teacher's classes.
   useEffect(() => {
     if (!accessToken) return;
@@ -50,6 +122,82 @@ export default function CreateAssignment({ onBack, onCreated }) {
       .catch(() => setError('Failed to load your classes.'))
       .finally(() => setLoadingClasses(false));
   }, [accessToken]);
+
+  // Caption pre-flight: ask the backend whether this video actually has
+  // captions in the chosen transcript language, so a teacher finds out here
+  // instead of from 25 students hitting a dead assignment. Purely advisory: any
+  // failure shows an "unknown" note and submission is never blocked.
+  useEffect(() => {
+    const target = preflight.url.trim();
+    if (!target || !fromLang) {
+      setCaptionCheck(null);
+      return;
+    }
+    // Skip a repeat of a check that already gave a real answer; an inconclusive
+    // one (lastCheckedRef cleared below) is worth another try.
+    const key = `${target}|${fromLang}`;
+    if (lastCheckedRef.current === key) return;
+    lastCheckedRef.current = key;
+
+    const reqId = captionReqRef.current + 1;
+    captionReqRef.current = reqId;
+    setCaptionCheck({ state: 'checking', lang: langName(fromLang) });
+
+    // Relay first, then our backend, mirroring the layering the player uses:
+    // YouTube IP-blocks the backend host's listing calls, so asking only the
+    // backend would report "could not check" for nearly every prod teacher.
+    (async () => {
+      let state = 'unknown';
+      if (CAPTION_RELAY_URL) {
+        state = await checkCaptions(CAPTION_RELAY_URL, target, fromLang);
+      }
+      // Only a failed listing is worth a second opinion; a real answer stands.
+      if (state === 'unknown') {
+        state = await checkCaptions(`${API_BASE_URL}/api/caption-tracks`, target, fromLang);
+      }
+      // A failed listing is not an answer about the video, so let a re-blur ask
+      // again rather than leaving the teacher stuck with "could not check".
+      if (state === 'unknown') lastCheckedRef.current = '';
+      if (captionReqRef.current !== reqId) return;
+      setCaptionCheck({ state, lang: langName(fromLang) });
+    })();
+  }, [preflight, fromLang]);
+
+  // Fill the title from YouTube when the teacher left it blank, so a class list
+  // isn't a wall of rows all reading "Assignment". oEmbed needs no API key and
+  // is CORS-open. Silent on failure: the teacher can always type their own.
+  const fetchTitleIfEmpty = async (rawUrl) => {
+    const target = toWatchUrl(rawUrl.trim());
+    if (!target) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TITLE_LOOKUP_TIMEOUT_MS);
+    try {
+      const endpoint = `https://www.youtube.com/oembed?url=${encodeURIComponent(target)}&format=json`;
+      const resp = await fetch(endpoint, { signal: controller.signal });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const fetched = (data && data.title ? String(data.title) : '').trim();
+      // Re-check emptiness: the teacher may have typed a title while we waited,
+      // and their words win over YouTube's.
+      if (fetched) setTitle((prev) => (prev.trim() ? prev : fetched));
+    } catch (_) {
+      // No title is fine; the field just stays empty.
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const handleUrlBlur = () => {
+    setPreflight((prev) => ({ url, nonce: prev.nonce + 1 }));
+    if (!title.trim()) fetchTitleIfEmpty(url);
+  };
+
+  // Duplicating an assignment that predates auto-filled titles would otherwise
+  // produce another untitled row, so look its title up once on mount.
+  useEffect(() => {
+    if (prefill?.url && !prefill.title) fetchTitleIfEmpty(prefill.url);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Lazily fetch a class roster the first time it's expanded.
   const loadRoster = (classId) => {
@@ -148,7 +296,12 @@ export default function CreateAssignment({ onBack, onCreated }) {
         Back to Classes
       </button>
 
-      <h2 className="dashboard-title">New Assignment</h2>
+      <h2 className="dashboard-title">{prefill ? 'Duplicate Assignment' : 'New Assignment'}</h2>
+      {prefill && (
+        <p className="assignment-player-note" style={{ margin: '0 0 14px', overflowWrap: 'anywhere' }}>
+          Copied from "{prefill.sourceTitle || 'the original'}". Pick who gets this copy.
+        </p>
+      )}
 
       <form onSubmit={handleSubmit} className="assignment-form">
         {/* Section 1: the video to practice */}
@@ -162,8 +315,11 @@ export default function CreateAssignment({ onBack, onCreated }) {
             placeholder="Paste a YouTube URL..."
             value={url}
             onChange={(e) => setUrl(e.target.value)}
+            onBlur={handleUrlBlur}
             required
           />
+
+          <CaptionNote check={captionCheck} />
 
           <label className="assignment-label">Title (optional)</label>
           <input

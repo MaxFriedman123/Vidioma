@@ -4,7 +4,32 @@ import { useAuth } from '../AuthContext';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 
-export default function ClassView({ classId, onBack, onStartAssignment, onOpenAssignment }) {
+// Label for an assignment row. Assignments created before titles were
+// auto-filled have no title at all, so fall back to the video id rather than
+// giving every such row the same word.
+function assignmentLabel(a) {
+  const explicit = a.title || a.videos?.title;
+  if (explicit) return explicit;
+  const youtubeId = a.youtube_id || a.videos?.youtube_id;
+  return youtubeId ? `Video ${youtubeId}` : 'Assignment';
+}
+
+// Seed values for a duplicate: the same video, language pair and instructions,
+// with no targets and no due date so the teacher chooses both. This is a plain
+// prefilled create, so it needs no backend support.
+function buildDuplicatePrefill(a, label) {
+  const youtubeId = a.youtube_id || a.videos?.youtube_id || '';
+  return {
+    url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : '',
+    title: a.title || a.videos?.title || '',
+    transcript_language: a.transcript_language || 'en',
+    translation_language: a.translation_language || 'es',
+    instructions: a.instructions || '',
+    sourceTitle: label,
+  };
+}
+
+export default function ClassView({ classId, onBack, onStartAssignment, onOpenAssignment, onDuplicateAssignment }) {
   const { accessToken, user } = useAuth();
   const [classData, setClassData] = useState(null);
   const [students, setStudents] = useState([]);
@@ -202,7 +227,7 @@ export default function ClassView({ classId, onBack, onStartAssignment, onOpenAs
         ) : (
           <div className="assignment-list">
             {assignments.map((a) => {
-              const title = a.title || a.videos?.title || 'Assignment';
+              const title = assignmentLabel(a);
               const due = a.due_date ? new Date(a.due_date) : null;
               const overdue = due && due < new Date();
               // Student progress badge
@@ -215,22 +240,41 @@ export default function ClassView({ classId, onBack, onStartAssignment, onOpenAs
                   className="assignment-list-item"
                   onClick={() => onOpenAssignment && onOpenAssignment(a.assignment_id)}
                 >
-                  <div className="assignment-list-main">
+                  {/* maxWidth: when the row stacks (<=768px) the item becomes a
+                      column with align-items:flex-start, so this sizes to its
+                      content and a long auto-filled title overflows instead of
+                      ellipsizing. Clamping to the parent restores the ellipsis. */}
+                  <div className="assignment-list-main" style={{ maxWidth: '100%' }}>
                     <span className="assignment-list-title">{title}</span>
                     <span className="assignment-list-langs">
                       {(a.transcript_language || 'en').toUpperCase()} → {(a.translation_language || 'es').toUpperCase()}
                     </span>
                   </div>
-                  <div className="assignment-list-meta">
+                  {/* wrap: the teacher row carries three items, which would
+                      otherwise overflow a 320px screen */}
+                  <div className="assignment-list-meta" style={{ flexWrap: 'wrap' }}>
                     {due && (
                       <span className={`assignment-list-due ${overdue ? 'assignment-due-overdue' : ''}`}>
                         Due {due.toLocaleDateString()}
                       </span>
                     )}
                     {isTeacher ? (
-                      <span className="assignment-list-stat">
-                        {a.completed_count}/{a.assigned_count} done
-                      </span>
+                      <>
+                        <span className="assignment-list-stat">
+                          {a.completed_count}/{a.assigned_count} done
+                        </span>
+                        {onDuplicateAssignment && (
+                          <button
+                            className="navbar-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDuplicateAssignment(buildDuplicatePrefill(a, title));
+                            }}
+                          >
+                            Duplicate
+                          </button>
+                        )}
+                      </>
                     ) : prog?.completed ? (
                       <span className="assignment-status-complete">✓ Done</span>
                     ) : (

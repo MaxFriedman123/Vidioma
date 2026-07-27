@@ -29,6 +29,7 @@ EXPECTED_RULES = {
     ("OPTIONS,POST", "/api/admin/clear-translation-cache"),
     ("GET,HEAD,OPTIONS", "/api/progress"),
     ("OPTIONS,POST", "/api/progress/upsert"),
+    ("OPTIONS,POST", "/api/attempts"),
     ("GET,HEAD,OPTIONS", "/api/progress/<youtube_id>"),
     ("GET,HEAD,OPTIONS", "/api/profile"),
     ("OPTIONS,POST", "/api/profile"),

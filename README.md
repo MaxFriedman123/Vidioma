@@ -8,7 +8,9 @@ Vidioma is an interactive language practice app for YouTube videos. You paste a 
 - Fetches captions in the user's browser by default (no server-side proxy needed)
 - Uses language-aware transcript selection (exact, regional, auto-translate fallback)
 - Lazily translates subtitle chunks during playback
+- Three practice modes: read and translate, listen and translate, or dictation
 - Uses fuzzy answer checking in the frontend for active recall practice
+- Logs every graded answer, so a missed line is recoverable rather than discarded
 - Caches transcript and translation work to reduce repeated latency
 - Optional accounts (Supabase): saved per-video progress and a resume dashboard
 - Optional classes: teachers create classes and share a join code; students enroll
@@ -128,6 +130,33 @@ npm start
 ```
 
 Frontend default URL: `http://localhost:3000`
+
+## Practice Modes
+
+The app started translate-only, with the source line printed on screen while the
+audio played. That made the audio decorative: a learner read a sentence and
+translated it, never mapping sound to meaning. Three modes now share the landing
+form, so listening is as prominent as translating:
+
+| Mode | Source line | Answer in | Graded against |
+| --- | --- | --- | --- |
+| Read & Translate | shown | target language | paragraph machine translation |
+| Listen & Translate | hidden | target language | paragraph machine translation |
+| Listen & Write (dictation) | hidden | source language | the video's own subtitle |
+
+Dictation has the best grading signal in the app. The other two compare a typed
+answer to machine-translated text, so a correct but differently worded answer can
+fail; dictation compares against the subtitle itself, which is ground truth, so
+that class of false negative cannot occur. It is therefore scored more strictly
+(0.85 vs 0.6) and unit-aware: a one-character slip inside a longer word is treated
+as a typo, while any wholly wrong word fails the line. See
+`frontend/src/practiceModes.js`.
+
+The listening modes hide the previous and next lines too, since seeing the
+surrounding lines gives away most of the current one. Each line has a Replay
+control and a Show line escape hatch; a revealed line is recorded with the attempt
+so a hinted pass is never mistaken for unaided mastery. The chosen mode persists
+in localStorage.
 
 ## Caption Fetching
 
@@ -253,6 +282,29 @@ With alignment (`lines` supplied), the response also contains
 
 Errors: `400` when the body is not a JSON object, `paragraphs` is missing/not a
 list of strings, or `from_lang`/`to_lang` are not strings.
+
+### `POST /api/attempts`
+
+Records graded answers. Requires auth. Accepts a batch, because a learner
+retrying a hard line would otherwise spend one request per attempt out of the
+same per-user budget the transcript and translation calls share.
+
+```json
+{ "attempts": [ {
+  "youtube_id": "dQw4w9WgXcQ", "transcript_language": "en",
+  "translation_language": "es", "line_index": 3,
+  "source_text": "We are no strangers to love",
+  "expected_text": "No somos ajenos al amor",
+  "user_text": "no somos ajenos al amor",
+  "practice_mode": "translate", "score": 0.91, "passed": true
+} ] }
+```
+
+Response `201`: `{ "recorded": 1 }`. Best-effort by design: a malformed entry is
+skipped rather than failing the batch, since losing an analytics row must never
+interrupt practice. `user_id` always comes from the verified token, never the
+payload. Run `backend/db/attempts_schema.sql` to create the table, which includes
+RLS and a documented retention policy.
 
 ### `GET /health`
 
