@@ -2646,27 +2646,66 @@ def db_keepalive():
     saved progress, classes, and assignments are all down. An external
     scheduler (see cloudflare-worker-keepalive/) calls this on a timer.
 
-    Unauthenticated on purpose: the caller is a cron job with no user identity,
-    and this needs no secret because it reveals nothing and writes nothing. It
-    performs the cheapest possible real read (one existing row's id from
-    `videos`), which is enough to count as activity.
+    This WRITES, and that is the whole point. It used to read
+    (`GET /videos?select=id&limit=1`) on the assumption that any real query
+    counts as activity. It does not: the Cloudflare cron ran 7 times over 8 days
+    with zero errors and Supabase still flagged the project as unused. A
+    `limit=1` read of one indexed column is exactly the shape of request that
+    can be served without meaningful database work. An upsert cannot be —
+    it has to reach Postgres, produce WAL and change on-disk state.
+
+    Writes to `public.keepalive` (backend/db/keepalive_schema.sql): a
+    single-row table that exists only for this, so the heartbeat can never be
+    mistaken for real data or need excluding from a user-facing query. Bumps
+    `pinged_at` and increments `ping_count`.
+
+    Unauthenticated on purpose: the caller is a cron job with no user identity.
+    Safe to leave open because it writes only to that sentinel row, reveals
+    nothing (the response is `{ok, pinged_at, ping_count}`), and is rate-limited.
 
     The limit is deliberately loose for its ~15-calls-a-month caller. Behind
     Render's proxy, get_remote_address sees the proxy IP, so limiter buckets are
     effectively GLOBAL rather than per-IP (verified in prod: a request from a
     laptop and one from a Cloudflare Worker shared a counter). A tight limit here
     would therefore let any unrelated caller lock out the cron, and a locked-out
-    tick means waiting 2 days for the next one. Still bounded, because the read
-    is O(1) and Supabase-cached.
+    tick means waiting 2 days for the next one. Still bounded: one upsert of one
+    row on a known primary key.
     """
     if not supabase_ready:
         return jsonify({"ok": False, "error": "Database not configured"}), 503
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        # select=id&limit=1 keeps this to a single indexed row; the response
-        # body is discarded, only reaching the DB matters.
-        _sb_get("videos", {"select": "id", "limit": "1"})
-        return jsonify({"ok": True, "pinged_at": datetime.now(timezone.utc).isoformat()})
+        # Read-then-write so ping_count actually increments. PostgREST has no
+        # `col = col + 1` expression, so the current value has to be fetched
+        # first. The read is incidental — the upsert below is what counts as
+        # activity — so a failed/empty read must NOT abort the ping: fall back
+        # to 0 and still write.
+        try:
+            existing = _sb_get("keepalive", {"select": "ping_count", "id": "eq.1"})
+            prev_count = int((existing[0] if existing else {}).get("ping_count", 0) or 0)
+        except Exception:
+            prev_count = 0
+
+        # on_conflict=id + merge-duplicates makes this an upsert against the
+        # single seeded row, so it works even if the row was never inserted (a
+        # fresh project) and can never create a second one (check id = 1).
+        #
+        # `return=representation`, NOT `return=minimal`: _sb_post ends in
+        # resp.json(), and `minimal` makes PostgREST reply 201 with an EMPTY
+        # body, so the parse raises and a write that actually succeeded is
+        # reported as a 502 failure. This was the first version of this fix and
+        # it only surfaced when run against a real PostgREST-shaped server —
+        # stubbing _sb_post hides it. Pinned by
+        # test_write_asks_for_a_representation_not_minimal. One row of three
+        # small columns, so the response body costs nothing.
+        _sb_post(
+            "keepalive",
+            {"id": 1, "pinged_at": now_iso, "ping_count": prev_count + 1},
+            extra_headers={"Prefer": "return=representation,resolution=merge-duplicates"},
+            params={"on_conflict": "id"},
+        )
+        return jsonify({"ok": True, "pinged_at": now_iso, "ping_count": prev_count + 1})
     except Exception as e:
         log.error("/api/db-keepalive error: %s", e)
         # Surfaced as non-200 so a failing keep-alive is visible to the caller's
