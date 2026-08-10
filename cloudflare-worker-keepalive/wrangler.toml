@@ -2,7 +2,8 @@ name = "vidioma-supabase-keepalive"
 main = "src/worker.js"
 compatibility_date = "2026-07-01"
 
-# Free tier: cron triggers are included, and this runs ~15 times a month.
+# Free tier: cron triggers are included, and this runs ~180 times a month
+# against an allowance of 100k invocations a day.
 workers_dev = true
 
 [vars]
@@ -13,8 +14,14 @@ workers_dev = true
 BACKEND_URL = "https://vidioma.onrender.com"
 
 [triggers]
-# 06:12 UTC every 2nd day. Every 2 days (not every 6) leaves room for two
-# consecutive missed runs before the 7-day pause threshold is reached. The odd
-# minute avoids the top-of-hour spike when Cloudflare schedules the most crons,
-# which is when a run is most likely to be delayed.
-crons = ["12 6 */2 * *"]
+# Every 4 hours, because the threshold is a DAILY one: Supabase counts a Free
+# project inactive on "too few user queries" in the past week and says "a few
+# user requests to the database each day over the previous week" is enough.
+# Every-2-days left 5 of every 7 days with zero activity, which is what got the
+# project flagged twice (see README).
+#
+# 6 ticks a day is 12 DB requests a day with six independent chances, so a
+# single failed tick never costs a day. The odd minute avoids the top-of-hour
+# spike when Cloudflare schedules the most crons, which is when a run is most
+# likely to be delayed.
+crons = ["12 */4 * * *"]

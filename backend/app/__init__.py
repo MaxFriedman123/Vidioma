@@ -2641,18 +2641,22 @@ def _ensure_video(youtube_id, title=None, thumbnail_url=None):
 def db_keepalive():
     """Touch the database so Supabase counts the project as active.
 
-    A Supabase free-plan project pauses after 7 consecutive days without
-    activity, and un-pausing is a manual dashboard action; while paused, auth,
+    A Supabase free-plan project pauses on too little activity over a 7-day
+    window, and un-pausing is a manual dashboard action; while paused, auth,
     saved progress, classes, and assignments are all down. An external
-    scheduler (see cloudflare-worker-keepalive/) calls this on a timer.
+    scheduler (see cloudflare-worker-keepalive/) calls this every 4 hours.
 
-    This WRITES, and that is the whole point. It used to read
-    (`GET /videos?select=id&limit=1`) on the assumption that any real query
-    counts as activity. It does not: the Cloudflare cron ran 7 times over 8 days
-    with zero errors and Supabase still flagged the project as unused. A
-    `limit=1` read of one indexed column is exactly the shape of request that
-    can be served without meaningful database work. An upsert cannot be —
-    it has to reach Postgres, produce WAL and change on-disk state.
+    WHAT ACTUALLY COUNTS IS DAILY VOLUME, NOT THE SHAPE OF THE REQUEST. Supabase
+    documents the rule as "too few user queries" in the past week, with "a few
+    user requests to the database each day over the previous week" being enough.
+    It draws no read/write distinction. The project got flagged twice while this
+    endpoint was called only every 2 days -- first as a read, then as this upsert
+    -- because both left 5 of every 7 days with zero activity. The fix was the
+    cron cadence, not the query. Do not stretch the schedule back out.
+
+    The upsert is kept because `ping_count` is a useful diagnostic: it separates
+    "the cron has run 40 times" from "one manual curl ran once", which a
+    timestamp alone cannot.
 
     Writes to `public.keepalive` (backend/db/keepalive_schema.sql): a
     single-row table that exists only for this, so the heartbeat can never be
@@ -2663,13 +2667,12 @@ def db_keepalive():
     Safe to leave open because it writes only to that sentinel row, reveals
     nothing (the response is `{ok, pinged_at, ping_count}`), and is rate-limited.
 
-    The limit is deliberately loose for its ~15-calls-a-month caller. Behind
+    The limit is deliberately loose for its ~180-calls-a-month caller. Behind
     Render's proxy, get_remote_address sees the proxy IP, so limiter buckets are
     effectively GLOBAL rather than per-IP (verified in prod: a request from a
     laptop and one from a Cloudflare Worker shared a counter). A tight limit here
-    would therefore let any unrelated caller lock out the cron, and a locked-out
-    tick means waiting 2 days for the next one. Still bounded: one upsert of one
-    row on a known primary key.
+    would therefore let any unrelated caller lock out the cron. Still bounded:
+    one upsert of one row on a known primary key.
     """
     if not supabase_ready:
         return jsonify({"ok": False, "error": "Database not configured"}), 503

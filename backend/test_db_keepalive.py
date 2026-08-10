@@ -1,15 +1,19 @@
 """Tests for the /api/db-keepalive endpoint.
 
 The endpoint exists so an external cron (cloudflare-worker-keepalive/) can keep a
-Supabase free-plan project from pausing after 7 idle days. The Supabase REST
-layer is stubbed so we exercise the real endpoint logic without a DB.
+Supabase free-plan project from pausing for low activity over a 7-day window. The
+Supabase REST layer is stubbed so we exercise the real endpoint logic without a DB.
 
-The central assertion is that the ping WRITES. The first version of this endpoint
-read (`GET /videos?select=id&limit=1`) and Supabase flagged the project unused
-anyway — the cron had run 7 times over 8 days with zero errors. A cheap indexed
-read can be served without real database work; an upsert cannot. So
-`test_ping_writes_the_heartbeat_row` is not a style preference, it pins the fix,
-and `test_ping_does_not_write_to_user_tables` keeps the heartbeat out of real data.
+These tests pin the endpoint's CONTRACT, not the reason the pause kept happening.
+The actual root cause was cron cadence: Supabase counts "user requests to the
+database each day", so calling this every 2 days left 5 of every 7 days empty and
+the project was flagged both as a read and as an upsert. That fix lives in
+`cloudflare-worker-keepalive/wrangler.toml` and no unit test here can cover it.
+
+What is still worth pinning: the ping writes exactly one row to the sentinel
+table (`ping_count` is the diagnostic that separates cron runs from a manual
+curl), it never touches user tables, and a successful write is never reported as
+a failure.
 
 Run from the backend directory:
     python test_db_keepalive.py
@@ -79,7 +83,7 @@ class DbKeepaliveTest(unittest.TestCase):
         )
 
     def test_ping_writes_the_heartbeat_row(self):
-        """The ping must WRITE. A read did not register as Supabase activity."""
+        """One upsert to the sentinel row, so ping_count stays a usable counter."""
         self._stub_db(prev_count=7)
 
         resp = self._ping()

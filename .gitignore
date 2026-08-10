@@ -9,3 +9,7 @@ dump.rdb
 .env
 .env.local
 .env.*.local
+
+# Wrangler's local cache (holds the account id). Each worker dir ignores its
+# own, but running wrangler from the repo root creates one here too.
+.wrangler/
