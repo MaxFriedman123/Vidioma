@@ -559,10 +559,6 @@ RATE_LIMIT_DEFAULT = os.environ.get("RATE_LIMIT_DEFAULT", "240 per hour;60 per m
 RATE_LIMIT_TRANSCRIPT = os.environ.get("RATE_LIMIT_TRANSCRIPT", "30 per minute;300 per hour")
 RATE_LIMIT_TRANSLATE = os.environ.get("RATE_LIMIT_TRANSLATE", "30 per minute;300 per hour")
 RATE_LIMIT_CAPTION_TRACKS = os.environ.get("RATE_LIMIT_CAPTION_TRACKS", "60 per minute;600 per hour")
-# Attempt logging is batched client-side, so a normal session sends far fewer
-# requests than it records attempts. Generous enough that a long practice run
-# never loses data, bounded so the table cannot be flooded.
-RATE_LIMIT_ATTEMPTS = os.environ.get("RATE_LIMIT_ATTEMPTS", "60 per minute;600 per hour")
 
 # Number of trusted reverse proxies in front of the app, used to pick the client
 # address out of X-Forwarded-For. On a PaaS host (Render) exactly one load
@@ -2810,145 +2806,6 @@ def upsert_progress():
         return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
-# Caps for the attempt log. A batch is bounded so one request cannot insert an
-# unbounded number of rows, and the free-text fields are truncated because they
-# are learner-supplied and land in a table that grows per submission.
-MAX_ATTEMPTS_PER_BATCH = 50
-MAX_ATTEMPT_TEXT_CHARS = 2000
-_VALID_PRACTICE_MODES = ("translate", "listen", "dictate")
-
-
-def _coerce_index(value, default=0):
-    """Non-negative int coercion for caller-supplied counters."""
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _clean_attempt(raw, user_id):
-    """Validate one client-reported attempt into a row, or return None.
-
-    Everything here is caller-supplied, so the user_id is taken from the verified
-    token rather than the payload: a client that sends someone else's id must not
-    be able to attribute practice to them.
-    """
-    if not isinstance(raw, dict):
-        return None
-
-    youtube_id = raw.get("youtube_id")
-    user_text = raw.get("user_text")
-    source_text = raw.get("source_text")
-    if not isinstance(youtube_id, str) or not youtube_id:
-        return None
-    if not isinstance(user_text, str) or not isinstance(source_text, str):
-        return None
-
-    from_lang = raw.get("transcript_language")
-    to_lang = raw.get("translation_language")
-    if not isinstance(from_lang, str) or not isinstance(to_lang, str):
-        return None
-    if not from_lang.strip() or not to_lang.strip():
-        return None
-
-    mode = raw.get("practice_mode", "translate")
-    if mode not in _VALID_PRACTICE_MODES:
-        mode = "translate"
-
-    try:
-        score = float(raw.get("score", 0))
-    except (TypeError, ValueError):
-        score = 0.0
-    # NaN and out-of-range would violate the CHECK constraint and fail the whole
-    # batch, so clamp rather than reject.
-    if score != score:
-        score = 0.0
-    score = max(0.0, min(1.0, score))
-
-    source_text = source_text[:MAX_ATTEMPT_TEXT_CHARS]
-
-    return {
-        "youtube_id": youtube_id,
-        "user_id": user_id,
-        "transcript_language": from_lang,
-        "translation_language": to_lang,
-        "line_index": _coerce_index(raw.get("line_index", 0)),
-        "source_text": source_text,
-        # Hashed on the normalized source so the identity survives a caption
-        # re-upload that only changes whitespace or casing. line_index alone is
-        # not stable: paragraph grouping shifts when a track is replaced.
-        "source_hash": hashlib.sha256(
-            " ".join(source_text.split()).lower().encode("utf-8")
-        ).hexdigest(),
-        "expected_text": (raw.get("expected_text") or "")[:MAX_ATTEMPT_TEXT_CHARS] or None,
-        "user_text": user_text[:MAX_ATTEMPT_TEXT_CHARS],
-        "practice_mode": mode,
-        "score": round(score, 3),
-        "passed": bool(raw.get("passed")),
-        "attempt_no": max(1, _coerce_index(raw.get("attempt_no", 1), default=1)),
-        "assignment_id": raw.get("assignment_id") or None,
-    }
-
-
-@app.route("/api/attempts", methods=["POST"])
-@require_auth
-@_rate_limit(RATE_LIMIT_ATTEMPTS)
-def log_attempts():
-    """Record graded answers.
-
-    The app used to compute a score for every submission and discard it, so a
-    learner's errors were unrecoverable: nothing knew which line they failed or
-    what they typed. This stores one row per submission.
-
-    Accepts a BATCH because a learner retrying a hard line would otherwise spend
-    one request per attempt out of the same per-user budget the transcript and
-    translation calls share. Best-effort by design: a malformed entry is skipped
-    rather than failing the batch, since losing an analytics row must never
-    interrupt practice.
-    """
-    if not supabase_ready:
-        return jsonify({"error": "Database not configured"}), 503
-
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"error": "Request body must be a JSON object"}), 400
-
-    raw_attempts = data.get("attempts")
-    if not isinstance(raw_attempts, list) or not raw_attempts:
-        return jsonify({"error": "attempts must be a non-empty array"}), 400
-    if len(raw_attempts) > MAX_ATTEMPTS_PER_BATCH:
-        return jsonify({"error": f"At most {MAX_ATTEMPTS_PER_BATCH} attempts per request"}), 400
-
-    cleaned = [_clean_attempt(a, g.user_id) for a in raw_attempts]
-    cleaned = [c for c in cleaned if c]
-    if not cleaned:
-        return jsonify({"error": "No usable attempts in the request"}), 400
-
-    try:
-        # Attempts arrive keyed by youtube_id; the table references videos.id, so
-        # resolve each distinct video once rather than per attempt.
-        video_ids = {}
-        rows = []
-        for c in cleaned:
-            yt = c.pop("youtube_id")
-            if yt not in video_ids:
-                video_ids[yt] = _ensure_video(yt)
-            vid = video_ids[yt]
-            if not vid:
-                continue
-            c["video_id"] = vid
-            rows.append(c)
-
-        if not rows:
-            return jsonify({"error": "Could not resolve the video"}), 500
-
-        _sb_post("line_attempts", rows, extra_headers={"Prefer": "return=minimal"})
-        return jsonify({"recorded": len(rows)}), 201
-    except Exception as e:
-        log.error("POST /api/attempts error: %s", e)
-        return jsonify({"error": "An internal error occurred. Please try again."}), 500
-
-
 @app.route("/api/progress/<youtube_id>", methods=["GET"])
 @require_auth
 def get_video_progress(youtube_id):
@@ -3283,33 +3140,6 @@ def delete_class(class_id):
             log_security_event("authz.denied.class_delete", "denied", g.user_id)
             return jsonify({"error": "Only the class teacher can delete this class"}), 403
 
-        # Assignments aimed at this class have to go too. Without this they
-        # survive with no reachable target: no class to list them under and no
-        # student to see them, so nobody can view or delete them again.
-        class_targets = _sb_get("assignment_targets", {
-            "select": "assignment_id",
-            "class_id": f"eq.{class_id}",
-        })
-        doomed_assignment_ids = {t["assignment_id"] for t in class_targets if t.get("assignment_id")}
-        if doomed_assignment_ids:
-            # An assignment can target several classes (one targets row each), so
-            # only the ones this class was the last target of become unreachable.
-            all_targets = _sb_get("assignment_targets", {
-                "select": "assignment_id, class_id",
-                "assignment_id": f"in.({','.join(doomed_assignment_ids)})",
-            })
-            for t in all_targets:
-                if str(t.get("class_id")) != str(class_id):
-                    doomed_assignment_ids.discard(t["assignment_id"])
-
-        if doomed_assignment_ids:
-            in_ids = ",".join(doomed_assignment_ids)
-            _sb_delete("assignment_progress", {"assignment_id": f"in.({in_ids})"})
-            _sb_delete("assignments", {"assignment_id": f"in.({in_ids})"})
-
-        # This class's targets go regardless, including those of assignments that
-        # remain reachable through another class.
-        _sb_delete("assignment_targets", {"class_id": f"eq.{class_id}"})
         # Remove all student enrollments first
         _sb_delete("student_classes", {"class_id": f"eq.{class_id}"})
         # Delete the class
@@ -3388,11 +3218,6 @@ MAX_ASSIGNMENT_ELAPSED_DELTA = 300
 # neutralizes crafted requests.
 MAX_ASSIGNMENT_ATTEMPTS_DELTA = 100
 
-# Upper bound on an assignment's caption line count. Even a feature-length video
-# transcribes to well under this, so it costs nothing legitimate while stopping a
-# crafted total_lines from making every teacher percentage meaningless.
-MAX_ASSIGNMENT_TOTAL_LINES = 5000
-
 
 def _assignment_student_ids(assignment_id):
     """Expand an assignment's targets into the concrete set of student ids.
@@ -3423,60 +3248,6 @@ def _student_sees_assignment(assignment_id, student_id):
     return student_id in _assignment_student_ids(assignment_id)
 
 
-def _assignment_counts(assignment_ids):
-    """Batched equivalent of _assignment_student_ids + a progress read, for many
-    assignments at once. Returns
-    ({assignment_id: set(student_id)}, {assignment_id: [progress row]})
-    using three queries total instead of one per assignment per class.
-    """
-    ids = [a for a in (assignment_ids or []) if a]
-    if not ids:
-        return {}, {}
-
-    in_ids = ",".join(str(a) for a in ids)
-    targets = _sb_get("assignment_targets", {
-        "select": "assignment_id, class_id, student_id",
-        "assignment_id": f"in.({in_ids})",
-    })
-
-    targeted = {aid: set() for aid in ids}
-    class_wide = {}
-    for t in targets:
-        aid = t.get("assignment_id")
-        if aid not in targeted:
-            continue
-        if t.get("student_id"):
-            targeted[aid].add(t["student_id"])
-        elif t.get("class_id"):
-            class_wide.setdefault(t["class_id"], set()).add(aid)
-
-    if class_wide:
-        roster = _sb_get("student_classes", {
-            "select": "class_id, student_id",
-            "class_id": f"in.({','.join(class_wide)})",
-        })
-        roster_by_class = {}
-        for r in roster:
-            if r.get("student_id"):
-                roster_by_class.setdefault(r["class_id"], set()).add(r["student_id"])
-        for class_id, aids in class_wide.items():
-            students = roster_by_class.get(class_id, set())
-            for aid in aids:
-                targeted[aid] |= students
-
-    progress = _sb_get("assignment_progress", {
-        "select": "student_id, completed, assignment_id",
-        "assignment_id": f"in.({in_ids})",
-    })
-    progress_by_assignment = {aid: [] for aid in ids}
-    for p in progress:
-        rows = progress_by_assignment.get(p.get("assignment_id"))
-        if rows is not None:
-            rows.append(p)
-
-    return targeted, progress_by_assignment
-
-
 @app.route("/api/assignments", methods=["POST"])
 @require_auth
 def create_assignment():
@@ -3488,7 +3259,6 @@ def create_assignment():
       transcript_language / translation_language (optional, default en/es)
       instructions        (optional)
       due_date            (optional ISO8601 string)
-      total_lines         (optional) caption line count, for the % display
       class_ids           (optional list) whole classes to assign to
       student_targets     (optional list of {class_id, student_id}) individual
                           students within a class
@@ -3518,16 +3288,6 @@ def create_assignment():
     instructions = (data.get("instructions") or "").strip() or None
     title = (data.get("title") or "").strip() or None
     due_date = (data.get("due_date") or "").strip() or None
-
-    # Coerce + clamp so a malformed value can't be stored as the denominator of
-    # every progress percentage the teacher later reads.
-    def _non_negative_int(value, default=0):
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return default
-
-    total_lines = min(_non_negative_int(data.get("total_lines", 0)), MAX_ASSIGNMENT_TOTAL_LINES)
 
     class_ids = data.get("class_ids") or []
     student_targets = data.get("student_targets") or []
@@ -3561,7 +3321,6 @@ def create_assignment():
             "translation_language": translation_language,
             "instructions": instructions,
             "due_date": due_date,
-            "total_lines": total_lines,
             "is_active": True,
         })
         assignment_id = assignment[0]["assignment_id"]
@@ -3622,16 +3381,13 @@ def list_assignments():
             if class_assignment_ids is not None:
                 params["assignment_id"] = f"in.({','.join(class_assignment_ids)})"
             assignments = _sb_get("assignments", params)
-            # Counts are gathered in three fixed queries rather than per
-            # assignment: the old shape was 1 + 2 per assignment (each with its
-            # own connect+read timeout), so a teacher with 30 assignments paid
-            # ~90 serial round trips just to render badge numbers.
-            targeted_by_assignment, progress_by_assignment = _assignment_counts(
-                [a["assignment_id"] for a in assignments])
             result = []
             for a in assignments:
-                targeted = targeted_by_assignment.get(a["assignment_id"], set())
-                prog = progress_by_assignment.get(a["assignment_id"], [])
+                targeted = _assignment_student_ids(a["assignment_id"])
+                prog = _sb_get("assignment_progress", {
+                    "select": "student_id, completed",
+                    "assignment_id": f"eq.{a['assignment_id']}",
+                })
                 completed = sum(1 for p in prog if p.get("completed"))
                 a["assigned_count"] = len(targeted)
                 a["completed_count"] = completed
@@ -3816,23 +3572,6 @@ def upsert_assignment_progress(assignment_id):
     attempts = min(_nn_int(data.get("attempts", 0)), MAX_ASSIGNMENT_ATTEMPTS_DELTA)
 
     try:
-        # The teacher creates an assignment before anyone has fetched its
-        # captions, so assignments.total_lines is often still 0 and every
-        # percentage on the teacher's view reads as 0%. The student client knows
-        # the real count, so adopt it once. Capped, and only ever written over a
-        # 0/null, so a crafted value can't rewrite the denominator other
-        # students are already being measured against.
-        if total_lines:
-            asg = _sb_get("assignments", {
-                "select": "assignment_id, total_lines",
-                "assignment_id": f"eq.{assignment_id}",
-                "limit": "1",
-            })
-            if asg and not _nn_int(asg[0].get("total_lines", 0)):
-                _sb_patch("assignments",
-                          {"total_lines": min(total_lines, MAX_ASSIGNMENT_TOTAL_LINES)},
-                          {"assignment_id": f"eq.{assignment_id}"})
-
         existing = _sb_get("assignment_progress", {
             "select": "*", "assignment_id": f"eq.{assignment_id}", "student_id": f"eq.{g.user_id}",
         })

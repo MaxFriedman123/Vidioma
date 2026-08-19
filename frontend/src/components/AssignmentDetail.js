@@ -30,16 +30,6 @@ function formatEndedAt(completedAt) {
   return new Date(completedAt).toLocaleString();
 }
 
-// Heading for an assignment. Assignments created before titles were auto-filled
-// have no title at all, so fall back to the video id rather than labelling every
-// such assignment with the same word. Mirrors ClassView's row label.
-function assignmentLabel(a, video) {
-  const explicit = a.title || video.title;
-  if (explicit) return explicit;
-  const youtubeId = a.youtube_id || video.youtube_id;
-  return youtubeId ? `Video ${youtubeId}` : 'Assignment';
-}
-
 // Assignment detail: teachers see per-student completion; students see the
 // assignment plus a Start/Continue button that launches the no-skip player.
 export default function AssignmentDetail({ assignmentId, onBack, onStartAssignment }) {
@@ -79,16 +69,9 @@ export default function AssignmentDetail({ assignmentId, onBack, onStartAssignme
 
   const a = data.assignment;
   const video = a.videos || {};
-  const title = assignmentLabel(a, video);
+  const title = a.title || video.title || 'Assignment';
   const due = formatDue(a.due_date);
   const isTeacher = data.is_teacher;
-
-  // TODO(assignment-edit): a teacher can only change a title / instructions /
-  // due date by deleting the assignment, which wipes every student's progress.
-  // Blocked on PATCH /api/assignments/<id> (title, instructions, due_date only;
-  // video_id and the language pair must be rejected because every stored
-  // line_index is relative to that transcript). Once it exists, add an "Edit"
-  // button here for is_teacher and post those three fields.
 
   return (
     <div className="class-view">

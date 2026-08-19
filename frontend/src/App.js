@@ -13,18 +13,9 @@ import ClassView from './components/ClassView';
 import CreateAssignment from './components/CreateAssignment';
 import AssignmentDetail from './components/AssignmentDetail';
 import { fetchClientCaptions } from './youtubeCaptions';
-import { splitParagraphToLines } from './answerMatching';
+import { splitParagraphToLines, getBestWindowSimilarity } from './answerMatching';
 import { useTranslations } from './useTranslations';
 import { useTranscriptLoader } from './useTranscriptLoader';
-import { useAttemptLog } from './useAttemptLog';
-import {
-  PRACTICE_MODES,
-  PRACTICE_MODE_OPTIONS,
-  answersInSourceLanguage,
-  gradeAnswer,
-  getModeOption,
-  isListeningMode,
-} from './practiceModes';
 
 const API_BASE_URL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace(/\/$/, '');
 // Optional Cloudflare Worker caption-list relay. When set, the browser lists
@@ -168,9 +159,6 @@ function App() {
   const [selectedClassId, setSelectedClassId] = useState(null);
   const [selectedAssignmentId, setSelectedAssignmentId] = useState(null);
   const [classesKey, setClassesKey] = useState(0);
-  // Seeds CreateAssignment when a teacher duplicates an existing assignment.
-  // Cleared on both exits so a later plain "create" starts empty.
-  const [assignmentPrefill, setAssignmentPrefill] = useState(null);
   const [authModalMode, setAuthModalMode] = useState(null); // null | 'login' | 'signup'
   const [guestBannerDismissed, setGuestBannerDismissed] = useState(false);
 
@@ -225,29 +213,6 @@ function App() {
   const [isError, setIsError] = useState(false); // Tracks wrong answers
   const [fromLang, setFromLang] = useState('en'); // Default to English
   const [toLang, setToLang] = useState('es');   // Default to Spanish
-  // Which task the learner is doing. Persisted because it is a durable
-  // preference, not a per-video choice, and re-picking it every session would
-  // push everyone back to the default.
-  const [practiceMode, setPracticeMode] = useState(() => {
-    try {
-      const saved = localStorage.getItem('vidioma_practice_mode');
-      return Object.values(PRACTICE_MODES).includes(saved) ? saved : PRACTICE_MODES.TRANSLATE;
-    } catch (_) {
-      return PRACTICE_MODES.TRANSLATE;
-    }
-  });
-  // Per-line escape hatch for the listening modes: reveals the hidden source line
-  // when a learner genuinely cannot decode it. Recorded with the attempt, so a
-  // revealed pass is never mistaken for unaided mastery. Resets on line change.
-  const [sourceRevealed, setSourceRevealed] = useState(false);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('vidioma_practice_mode', practiceMode);
-    } catch (_) {
-      // A private-mode browser can refuse writes; the choice just won't persist.
-    }
-  }, [practiceMode]);
   // Paragraph translations live in their own hook (see useTranslations.js): the
   // translated text, per-line chunks, per-paragraph status, in-flight guards and
   // the retry path. Declared here because it needs `transcript` and `paragraphs`.
@@ -268,13 +233,6 @@ function App() {
     activePlayerSessionRef,
     translationRequestControllersRef,
     isCanceledRequestError,
-  });
-
-  // Records each graded answer (see useAttemptLog). Buffered and batched, so a
-  // learner retrying a hard line does not fire a request per attempt.
-  const { recordAttempt } = useAttemptLog({
-    apiBaseUrl: API_BASE_URL,
-    accessTokenRef,
   });
 
   // The three launch paths (home GO, dashboard card, assignment) all load a
@@ -700,21 +658,6 @@ function App() {
     }
   };
 
-  // Replays just the current line's audio. Seeks to its start and plays; the
-  // auto-pause interval stops it again at the line's end, so this needs no
-  // stopping logic of its own.
-  const replayCurrentLine = useCallback(() => {
-    const line = transcript[currentLineIndex];
-    if (!player || !line) return;
-    try {
-      player.seekTo(line.start, true);
-      player.playVideo();
-      setShowInput(false);
-    } catch (_) {
-      // A not-yet-ready iframe can reject seekTo; the learner can retry.
-    }
-  }, [player, transcript, currentLineIndex]);
-
   const handleManualPlay = () => {
     // A manual start counts as the initial start, so the autostart effect won't
     // also fire (and won't sit waiting on a translation the user chose to skip).
@@ -838,7 +781,6 @@ function App() {
         setUserInput('');       // Clear text
         setShowInput(false);    // Hide box
         setAnswered(false);    // Reset answered state
-        setSourceRevealed(false); // Re-hide the source line for the next line
         player.playVideo();     // Resume Video
 
         // Save progress after advancing. Assignment mode saves to the assignment
@@ -890,40 +832,15 @@ function App() {
           (activeAssignmentRef.current.pendingAttempts ?? 0) + 1;
       }
 
-      // Grading depends on the mode: dictation is scored against the video's own
-      // subtitle (ground truth), the other two against the machine translation.
-      const { score, passed, expected } = gradeAnswer({
-        mode: practiceMode,
-        userInput,
-        sourceLine: currentLine?.source,
-        paragraphTranslation,
-      });
-
-      // Log the attempt regardless of outcome. This is the data the app used to
-      // compute and discard; a failed attempt is the more useful of the two.
-      recordAttempt({
-        youtube_id: videoId,
-        transcript_language: fromLang,
-        translation_language: toLang,
-        line_index: currentLineIndex,
-        source_text: currentLine?.source || '',
-        expected_text: expected,
-        user_text: userInput,
-        practice_mode: practiceMode,
-        score,
-        passed,
-        revealed: sourceRevealed,
-        assignment_id: activeAssignmentRef.current?.assignmentId || null,
-      });
-
-      if (passed) {
+      const score = getBestWindowSimilarity(userInput, paragraphTranslation, currentLine?.source);
+      if (score >= 0.6) {
         setAnswered(true); // Mark current line as answered
         setIsError(false); // Clear any previous error state
       } else {
         setIsError(true); // Mark as error to show red border
       }
     }
-  }, [answered, currentLineIndex, transcript, player, userInput, translatedParagraphs, videoId, fromLang, toLang, saveProgress, saveAssignmentProgress, practiceMode, sourceRevealed, recordAttempt]);
+  }, [answered, currentLineIndex, transcript, player, userInput, translatedParagraphs, videoId, fromLang, toLang, saveProgress, saveAssignmentProgress]);
 
   const handleInputSubmit = (e) => {
     if (e.key === 'Enter') {
@@ -998,9 +915,6 @@ function App() {
   const currentParagraphTranslation = translatedParagraphs[currentParagraphIdx];
   const currentStatus = translationStatus[currentParagraphIdx];
   const translationPending = transcript.length > 0 && (currentStatus === 'pending' || (!hasOwn(translatedParagraphs, currentParagraphIdx) && currentStatus !== 'failed'));
-  const listeningMode = isListeningMode(practiceMode);
-  // Hidden unless the learner has explicitly revealed this line.
-  const sourceHidden = listeningMode && !sourceRevealed;
   const translationFailed = currentStatus === 'failed' && currentParagraphTranslation === undefined;
   const prevLine = safeLineIndex > 0 ? transcript[safeLineIndex - 1] : null;
   const nextLine = safeLineIndex < transcript.length - 1 ? transcript[safeLineIndex + 1] : null;
@@ -1142,16 +1056,14 @@ function App() {
             onBack={() => { setClassesKey(k => k + 1); setView('classes'); }}
             onStartAssignment={handleStartAssignment}
             onOpenAssignment={(assignmentId) => { setSelectedAssignmentId(assignmentId); setView('assignmentDetail'); }}
-            onDuplicateAssignment={(prefill) => { setAssignmentPrefill(prefill); setView('createAssignment'); }}
           />
         )}
 
         {/* ── CREATE ASSIGNMENT VIEW (teacher) ───────────────── */}
         {view === 'createAssignment' && isAuthenticated && (
           <CreateAssignment
-            prefill={assignmentPrefill}
-            onBack={() => { setAssignmentPrefill(null); setView('classes'); }}
-            onCreated={() => { setAssignmentPrefill(null); setClassesKey(k => k + 1); setView('classes'); }}
+            onBack={() => setView('classes')}
+            onCreated={() => { setClassesKey(k => k + 1); setView('classes'); }}
           />
         )}
 
@@ -1207,25 +1119,6 @@ function App() {
                   />
                 </div>
               </div>
-
-              {/* Practice mode. Sits in the primary form, not a settings menu, so
-                  listening is as discoverable as translating. */}
-              <div className="mode-row" role="radiogroup" aria-label="Practice mode">
-                {PRACTICE_MODE_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    className={`mode-chip ${practiceMode === opt.id ? 'mode-chip-active' : ''}`}
-                    onClick={() => setPracticeMode(opt.id)}
-                    role="radio"
-                    aria-checked={practiceMode === opt.id}
-                    title={opt.hint}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-              <p className="mode-hint">{getModeOption(practiceMode).hint}</p>
 
               {/* Submit Button */}
               <button type="submit" className="go-button" disabled={isLoading}>
@@ -1356,40 +1249,16 @@ function App() {
                 ) : (
                 <div className="focus-card">
                   <div className="scroll-window" key={safeLineIndex}>
-                    {/* In the listening modes the source line is hidden, so the
-                        learner has to decode it from the audio. Neighbouring lines
-                        are hidden too: seeing the line before and after gives away
-                        most of the current one from context. */}
-                    <div className={`scroll-line scroll-line-prev ${sourceHidden ? 'source-hidden' : ''}`}>
+                    <div className="scroll-line scroll-line-prev">
                       {prevLine ? prevLine.source : '\u00A0'}
                     </div>
-                    <h2 className={`scroll-line scroll-line-current current-text ${sourceHidden ? 'source-hidden' : ''}`}>
+                    <h2 className="scroll-line scroll-line-current current-text">
                       {currentLine.source}
                     </h2>
-                    <div className={`scroll-line scroll-line-next ${sourceHidden ? 'source-hidden' : ''}`}>
+                    <div className="scroll-line scroll-line-next">
                       {nextLine ? nextLine.source : '\u00A0'}
                     </div>
                   </div>
-
-                  {/* Listening controls: replay the line, and reveal it as a last
-                      resort. Without a replay a learner gets exactly one chance to
-                      hear a line, which makes the listening modes punishing rather
-                      than difficult. */}
-                  {listeningMode && (
-                    <div className="listen-controls">
-                      <button type="button" className="listen-btn" onClick={replayCurrentLine}>
-                        Replay line
-                      </button>
-                      <button
-                        type="button"
-                        className="listen-btn"
-                        onClick={() => setSourceRevealed((v) => !v)}
-                        aria-pressed={sourceRevealed}
-                      >
-                        {sourceRevealed ? 'Hide line' : 'Show line'}
-                      </button>
-                    </div>
-                  )}
                   {/* Translation display — mirrors the source scroll with prev/current/next
                       lines. The full paragraph is translated for context, then split per
                       source line for display. */}
@@ -1489,13 +1358,7 @@ function App() {
                           ref={inputRef}
                           type="text"
                           className={`big-input ${isError ? 'input-error' : ''}`}
-                          placeholder={practiceMode === PRACTICE_MODES.DICTATE
-                            ? 'Type what you hear...'
-                            : 'Type translation...'}
-                          // Tells a mobile keyboard which language to suggest:
-                          // dictation is answered in the source language, the
-                          // other modes in the target language.
-                          lang={answersInSourceLanguage(practiceMode) ? fromLang : toLang}
+                          placeholder="Type translation..."
                           value={userInput}
                           onChange={(e) => {
                             setUserInput(e.target.value);
